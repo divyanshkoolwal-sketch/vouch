@@ -1,0 +1,145 @@
+// The verification pipeline: fast-to-slow tiers, early-exit on compile-class
+// failures, intent review only when the deterministic tiers are green, then
+// dismissal-filter + dedupe + prioritize into one result. Deterministic tools
+// produce blocking "facts"; the LLM review produces non-blocking "questions"
+// (unless the user opts intent into blockOn). Dependencies are injectable so
+// the decision logic is unit-testable without spawning anything.
+import { Finding, IntentRecord, TierName, VouchConfig, VerifyResult } from './types';
+import { runTier as defaultRunTier, TierRun } from './runners';
+import { reviewIntent as defaultReviewIntent, reviewerAvailable as defaultReviewerAvailable } from './reviewer';
+import { workingDiff as defaultWorkingDiff, DiffResult } from './diff';
+import { dedupe } from './findings';
+import { loadDismissals, filterDismissed } from './dismissals';
+import { buildFixPrompt, summaryLine } from './prioritize';
+
+export interface PipelineDeps {
+  runTier: typeof defaultRunTier;
+  reviewIntent: typeof defaultReviewIntent;
+  reviewerAvailable: () => boolean;
+  workingDiff: (proj: string) => DiffResult;
+}
+
+const defaultDeps: PipelineDeps = {
+  runTier: defaultRunTier,
+  reviewIntent: defaultReviewIntent,
+  reviewerAvailable: defaultReviewerAvailable,
+  workingDiff: defaultWorkingDiff,
+};
+
+const TIER_ORDER: TierName[] = ['typecheck', 'lint', 'build', 'test'];
+
+export async function runPipeline(opts: {
+  proj: string;
+  cfg: VouchConfig;
+  intent: IntentRecord | null;
+  force?: boolean; // run even when the diff is empty (manual /vouch-verify)
+  roundInfo?: string;
+  deps?: Partial<PipelineDeps>;
+}): Promise<VerifyResult> {
+  const deps: PipelineDeps = { ...defaultDeps, ...(opts.deps ?? {}) };
+  const { proj, cfg, intent } = opts;
+  const startedAt = Date.now();
+  const overBudget = () => (Date.now() - startedAt) / 1000 > cfg.budgetSec;
+
+  const ranTiers: TierName[] = [];
+  const skipped: { tier: TierName; reason: string }[] = [];
+  let findings: Finding[] = [];
+
+  const diff = deps.workingDiff(proj);
+  const diffEmpty = !diff.patch;
+
+  if (diffEmpty && !opts.force) {
+    return {
+      diffEmpty: true,
+      ranTiers,
+      skipped,
+      findings: [],
+      blocking: [],
+      questions: [],
+      notices: [],
+      fixPrompt: '',
+      summary: 'Vouch: no changes to verify',
+    };
+  }
+
+  // ---- Tier 1: deterministic checks (facts) ----
+  let compileBroken = false;
+  for (const tier of TIER_ORDER) {
+    const rc = cfg.commands[tier as keyof typeof cfg.commands];
+    if (!cfg.tiers[tier]) continue;
+    if (!rc || !rc.enabled || !rc.cmd) continue;
+
+    if (compileBroken) {
+      skipped.push({ tier, reason: 'skipped — a compile-class check (typecheck/build) already failed' });
+      continue;
+    }
+    if (overBudget()) {
+      skipped.push({ tier, reason: `time budget (${cfg.budgetSec}s) reached` });
+      continue;
+    }
+
+    const blocking = cfg.enforcement.block && cfg.enforcement.blockOn.includes(tier);
+    const run: TierRun = await deps.runTier(tier, rc, proj, cfg.commandTimeoutSec * 1000, blocking);
+    ranTiers.push(tier);
+
+    if (run.skippedReason) {
+      skipped.push({ tier, reason: run.skippedReason });
+      continue;
+    }
+    if (run.finding) {
+      findings.push(run.finding);
+      if (tier === 'typecheck' || tier === 'build') compileBroken = true;
+    }
+  }
+
+  // Any blocking facts so far? If so, defer the (slower, paid) intent review —
+  // fix the hard failures first; the next round runs the review once green.
+  const hasBlockingFact = findings.some((f) => f.kind === 'blocking');
+
+  // ---- Tier 2: independent intent-vs-diff review (questions) ----
+  if (!cfg.tiers.intent) {
+    skipped.push({ tier: 'intent', reason: 'intent tier disabled' });
+  } else if (compileBroken || hasBlockingFact) {
+    skipped.push({ tier: 'intent', reason: 'deferred — fix the verified failures first' });
+  } else if (!intent) {
+    skipped.push({ tier: 'intent', reason: 'no active intent captured (run /vouch:intent)' });
+  } else if (!diff.isGit) {
+    skipped.push({ tier: 'intent', reason: 'not a git repo — cannot scope a diff to review' });
+  } else if (!deps.reviewerAvailable()) {
+    skipped.push({ tier: 'intent', reason: '`claude` CLI not available for the independent reviewer' });
+  } else if (overBudget()) {
+    // Don't start the slow reviewer if we'd risk blowing the Stop-hook timeout.
+    skipped.push({ tier: 'intent', reason: `time budget (${cfg.budgetSec}s) reached before intent review` });
+  } else {
+    ranTiers.push('intent');
+    const reviewFindings = await deps.reviewIntent({ proj, intent, patch: diff.patch, truncated: diff.truncated, cfg });
+    findings.push(...reviewFindings);
+  }
+
+  // Tier 3 (web smoke) is experimental and not yet wired. If a user opts in,
+  // say so explicitly rather than silently doing nothing.
+  if (cfg.tiers.smoke) {
+    skipped.push({ tier: 'smoke', reason: 'web smoke tier is experimental and not yet available in this build' });
+  }
+
+  // ---- Filter dismissed + dedupe ----
+  findings = dedupe(filterDismissed(findings, loadDismissals(proj)));
+
+  const blocking = findings.filter((f) => f.kind === 'blocking');
+  const questions = findings.filter((f) => f.kind === 'question');
+  const notices = findings.filter((f) => f.kind === 'info');
+
+  const fixPrompt = blocking.length ? buildFixPrompt(blocking, questions, opts.roundInfo, notices) : '';
+
+  return {
+    diffEmpty,
+    ranTiers,
+    skipped,
+    findings,
+    blocking,
+    questions,
+    notices,
+    fixPrompt,
+    summary: summaryLine(blocking, questions, notices),
+  };
+}
