@@ -12,20 +12,54 @@ Vouch is built to be **trusted**: deterministic tool failures are treated as *fa
 
 ---
 
-## Install
+## Add Vouch to your Claude Code (about 2 minutes)
 
-In Claude Code, add this repo as a marketplace and install — **one line, no build step, no API key** (the plugin ships a pre-built `dist/` and the reviewer reuses your existing Claude Code auth):
+No build step, no API key, no cloud — the plugin ships prebuilt and the reviewer reuses the Claude Code login you already have.
+
+**Before you start**, make sure you have: Claude Code (v2.1 or newer), Node 18+, and `git`. That's it.
+
+### Step 1 — Add the plugin
+Open Claude Code and type these two commands (one at a time):
 
 ```
 /plugin marketplace add divyanshkoolwal-sketch/vouch
 /plugin install vouch@vouch
 ```
 
-Then start a fresh session. Vouch stays dormant in any repo until you run `/vouch:setup` there.
+The first tells Claude Code where to find Vouch; the second installs it. If it asks for a scope, pick **user** (so it's available in all your projects).
 
-**Requirements:** Claude Code (v2.1+), Node 18+, and `git` on PATH. Language servers / Semgrep / ctags are used only if already installed (optional).
+### Step 2 — Restart Claude Code
+Quit and reopen it (or start a new session). Plugins only load at startup, so this step is required. To confirm it worked, type `/plugin` — you should see **vouch** listed as *enabled*.
 
-<details><summary>Local development install</summary>
+### Step 3 — Turn it on for a project
+Open a project (any git repo) and run:
+
+```
+/vouch:setup
+```
+
+Vouch auto-detects how to run your tests/build and asks **one** question to confirm. Done — it's now watching this repo. (It stays asleep in repos where you haven't run setup, so it never gets in your way elsewhere.)
+
+### Step 4 (optional but recommended) — Tell it what you're building
+Right before a non-trivial change, run:
+
+```
+/vouch:intent
+```
+
+…and describe, in plain words, what the change should do. Vouch checks the agent's work against that.
+
+### That's it — now just work normally
+When the coding agent finishes a change, Vouch automatically runs your project's checks **and** an independent review of the diff. If something's actually broken it stops the agent, hands it one clear fix, and re-checks until it's right. Uncertain stuff is shown as a *question*, never a hard block.
+
+**Handy commands:** `/vouch:verify` (check now) · `/vouch:status` (what's set up + latest findings) · `/vouch:off` (pause/resume).
+
+**Troubleshooting**
+- *Don't see the `/vouch:` commands?* Restart Claude Code, then check `/plugin` shows vouch enabled.
+- *"Vouch is not set up" message?* Run `/vouch:setup` in that repo.
+- *Want to remove it?* `/plugin uninstall vouch@vouch`.
+
+<details><summary>Prefer to run it from source (for hacking on Vouch)?</summary>
 
 ```bash
 git clone https://github.com/divyanshkoolwal-sketch/vouch && cd vouch
