@@ -9,6 +9,8 @@ import { runTier as defaultRunTier, TierRun } from './runners';
 import { reviewIntent as defaultReviewIntent, reviewerAvailable as defaultReviewerAvailable } from './reviewer';
 import { workingDiff as defaultWorkingDiff, DiffResult } from './diff';
 import { buildChunks, BuildChunksResult } from './review/chunk';
+import { detectWorkspaces, affectedPackages } from './workspaces';
+import { selectTests } from './tia';
 import { dedupe } from './findings';
 import { loadDismissals, filterDismissed } from './dismissals';
 import { buildFixPrompt, summaryLine } from './prioritize';
@@ -65,10 +67,18 @@ export async function runPipeline(opts: {
     };
   }
 
+  // Monorepo + change scoping (for coverage reporting and test-impact analysis).
+  const changedFiles = diff.files;
+  const ws = detectWorkspaces(proj);
+  const scopedPkgs = ws.isMonorepo ? affectedPackages(changedFiles, ws.packages) : [];
+  let testsSelected: number | null = null;
+  const coverageNotes: string[] = [];
+  if (ws.isMonorepo) coverageNotes.push(`monorepo (${ws.tool}); ${scopedPkgs.length} package(s) affected`);
+
   // ---- Tier 1: deterministic checks (facts) ----
   let compileBroken = false;
   for (const tier of TIER_ORDER) {
-    const rc = cfg.commands[tier as keyof typeof cfg.commands];
+    let rc = cfg.commands[tier as keyof typeof cfg.commands];
     if (!cfg.tiers[tier]) continue;
     if (!rc || !rc.enabled || !rc.cmd) continue;
 
@@ -80,6 +90,19 @@ export async function runPipeline(opts: {
       budgetHit = true;
       skipped.push({ tier, reason: `time budget (${cfg.budgetSec}s) reached` });
       continue;
+    }
+
+    // Test-impact analysis: narrow the test tier to affected tests (safe fallback
+    // to the full suite when uncertain — never risk skipping an affected test).
+    if (tier === 'test' && cfg.tia.enabled && diff.isGit) {
+      const tia = selectTests({ proj, testCmd: rc.cmd, changedFiles, enabled: true });
+      if (tia.narrowed) {
+        rc = { ...rc, cmd: tia.command };
+        testsSelected = tia.selectedCount;
+        coverageNotes.push(`tests: ${tia.reason}`);
+      } else {
+        coverageNotes.push(`tests: ${tia.reason}`);
+      }
     }
 
     const blocking = cfg.enforcement.block && cfg.enforcement.blockOn.includes(tier);
@@ -145,10 +168,10 @@ export async function runPipeline(opts: {
     filesReviewed: built ? built.includedFiles.length : 0,
     filesSkippedTooLarge: built ? [...built.skippedFiles, ...built.clippedFiles] : [],
     chunksReviewed: built ? built.chunks.length : 0,
-    packagesScoped: [],
-    testsSelected: null,
+    packagesScoped: scopedPkgs.map((p) => p.name),
+    testsSelected,
     budgetHit,
-    notes: [],
+    notes: coverageNotes,
   };
 
   return {

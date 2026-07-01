@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path6) {
-      let input = path6;
+    function removeDotSegments(path8) {
+      let input = path8;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path6, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path6 && path6 !== "/" ? path6 : void 0;
+        const [path8, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path8 && path8 !== "/" ? path8 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs7, exportName) {
+    function addFormats(ajv, list, fs9, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs7[f]);
+        ajv.addFormat(f, fs9[f]);
     }
     module2.exports = exports2 = formatsPlugin;
     Object.defineProperty(exports2, "__esModule", { value: true });
@@ -7364,8 +7364,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path6, errorMaps, issueData } = params;
-  const fullPath = [...path6, ...issueData.path || []];
+  const { data, path: path8, errorMaps, issueData } = params;
+  const fullPath = [...path8, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7481,11 +7481,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path6, key) {
+  constructor(parent, value, path8, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path6;
+    this._path = path8;
     this._key = key;
   }
   get path() {
@@ -11123,10 +11123,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path6) {
-  if (!path6)
+function getElementAtPath(obj, path8) {
+  if (!path8)
     return obj;
-  return path6.reduce((acc, key) => acc?.[key], obj);
+  return path8.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11446,11 +11446,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path6, issues) {
+function prefixIssues(path8, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path6);
+    iss.path.unshift(path8);
     return iss;
   });
 }
@@ -21907,6 +21907,167 @@ function buildChunks(perFile, cfg) {
   };
 }
 
+// src/core/workspaces.ts
+var fs5 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
+function readJSON2(file) {
+  try {
+    return JSON.parse(fs5.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function detectPackageManager(proj2) {
+  if (fs5.existsSync(path5.join(proj2, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs5.existsSync(path5.join(proj2, "yarn.lock"))) return "yarn";
+  if (fs5.existsSync(path5.join(proj2, "bun.lockb")) || fs5.existsSync(path5.join(proj2, "bun.lock"))) return "bun";
+  return "npm";
+}
+function expandGlob(proj2, pattern) {
+  const clean = pattern.replace(/\/\*\*$/, "/*");
+  if (clean.endsWith("/*")) {
+    const base = clean.slice(0, -2);
+    const baseDir = path5.join(proj2, base);
+    try {
+      return fs5.readdirSync(baseDir, { withFileTypes: true }).filter((d) => d.isDirectory() && fs5.existsSync(path5.join(baseDir, d.name, "package.json"))).map((d) => path5.join(base, d.name));
+    } catch {
+      return [];
+    }
+  }
+  return fs5.existsSync(path5.join(proj2, clean, "package.json")) ? [clean] : [];
+}
+function pkgFromDir(proj2, dir) {
+  const pj = readJSON2(path5.join(proj2, dir, "package.json"));
+  return { name: pj?.name || path5.basename(dir) || "root", dir };
+}
+function detectWorkspaces(proj2) {
+  const pm = detectPackageManager(proj2);
+  const rootPkg = readJSON2(path5.join(proj2, "package.json"));
+  let patterns = [];
+  let tool = "none";
+  const pnpmWs = path5.join(proj2, "pnpm-workspace.yaml");
+  if (fs5.existsSync(pnpmWs)) {
+    tool = "pnpm";
+    const txt = fs5.readFileSync(pnpmWs, "utf8");
+    let inPkgs = false;
+    for (const line of txt.split("\n")) {
+      if (/^packages:/.test(line)) {
+        inPkgs = true;
+        continue;
+      }
+      if (inPkgs) {
+        const m = line.match(/^\s*-\s*['"]?([^'"]+)['"]?\s*$/);
+        if (m) patterns.push(m[1]);
+        else if (/^\S/.test(line)) break;
+      }
+    }
+  }
+  if (!patterns.length && rootPkg?.workspaces) {
+    const ws = Array.isArray(rootPkg.workspaces) ? rootPkg.workspaces : rootPkg.workspaces.packages;
+    if (Array.isArray(ws)) {
+      patterns = ws;
+      tool = pm;
+    }
+  }
+  if (fs5.existsSync(path5.join(proj2, "nx.json"))) tool = "nx";
+  else if (fs5.existsSync(path5.join(proj2, "turbo.json"))) tool = "turbo";
+  else if (fs5.existsSync(path5.join(proj2, "lerna.json")) && tool === "none") tool = "lerna";
+  const dirs = /* @__PURE__ */ new Set();
+  for (const p of patterns) for (const d of expandGlob(proj2, p)) dirs.add(d);
+  if (!dirs.size) {
+    const cargo = readCargoWorkspace(proj2);
+    if (cargo.length) return { isMonorepo: true, tool: "cargo", packageManager: pm, packages: cargo };
+    if (fs5.existsSync(path5.join(proj2, "go.work"))) return { isMonorepo: true, tool: "go", packageManager: pm, packages: [] };
+  }
+  const packages = [...dirs].sort().map((d) => pkgFromDir(proj2, d));
+  return { isMonorepo: packages.length > 0, tool: packages.length ? tool : "none", packageManager: pm, packages };
+}
+function readCargoWorkspace(proj2) {
+  const cargo = path5.join(proj2, "Cargo.toml");
+  if (!fs5.existsSync(cargo)) return [];
+  const txt = fs5.readFileSync(cargo, "utf8");
+  if (!/\[workspace\]/.test(txt)) return [];
+  const m = txt.match(/members\s*=\s*\[([^\]]*)\]/);
+  if (!m) return [];
+  const members = [...m[1].matchAll(/["']([^"']+)["']/g)].map((x) => x[1]);
+  const dirs = /* @__PURE__ */ new Set();
+  for (const p of members) for (const d of expandGlob(proj2, p)) dirs.add(d);
+  return [...dirs].map((d) => ({ name: path5.basename(d), dir: d }));
+}
+function affectedPackages(changedFiles, packages) {
+  const byDirLen = [...packages].sort((a, b) => b.dir.length - a.dir.length);
+  const hit = /* @__PURE__ */ new Map();
+  for (const f of changedFiles) {
+    for (const p of byDirLen) {
+      if (p.dir === "" || f === p.dir || f.startsWith(p.dir + "/")) {
+        hit.set(p.dir, p);
+        break;
+      }
+    }
+  }
+  return [...hit.values()];
+}
+
+// src/core/tia.ts
+var fs6 = __toESM(require("fs"));
+var path6 = __toESM(require("path"));
+var ROOT_PATTERNS = [
+  /(^|\/)package\.json$/,
+  /(^|\/)[^/]*lock[^/]*$/i,
+  /(^|\/)tsconfig[^/]*\.json$/,
+  /(^|\/)(jest|vitest|vite|babel|tsup|rollup|webpack)\.config\.[cm]?[jt]s$/,
+  /(^|\/)\.?eslintrc/,
+  /(^|\/)(jest|vitest)\.setup\.[cm]?[jt]s$/
+];
+var CODE_RE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
+function detectRunner(cmd) {
+  if (/\bvitest\b/.test(cmd)) return "vitest";
+  if (/\bjest\b/.test(cmd)) return "jest";
+  return null;
+}
+function viaScript(cmd) {
+  return /^(npm|pnpm|yarn|bun)\b/.test(cmd.trim());
+}
+function selectTests(opts) {
+  const { proj: proj2, testCmd, changedFiles, enabled } = opts;
+  const full = (reason) => ({ command: testCmd, narrowed: false, selectedCount: null, reason });
+  if (!enabled) return full("TIA disabled");
+  const runner = detectRunner(testCmd);
+  let effectiveRunner = runner;
+  if (!effectiveRunner && viaScript(testCmd)) {
+    try {
+      const pj = JSON.parse(fs6.readFileSync(path6.join(proj2, "package.json"), "utf8"));
+      effectiveRunner = detectRunner(String(pj?.scripts?.test ?? ""));
+    } catch {
+    }
+  }
+  if (!effectiveRunner) return full("unrecognized test runner \u2192 full suite");
+  if (changedFiles.some((f) => ROOT_PATTERNS.some((re) => re.test(f)))) {
+    return full("a root/config file changed \u2192 full suite");
+  }
+  const sources = changedFiles.filter((f) => CODE_RE.test(f) && fs6.existsSync(path6.join(proj2, f)));
+  if (sources.length === 0) return full("no changed source files to target \u2192 full suite");
+  const fileArgs = sources.map((f) => JSON.stringify(f)).join(" ");
+  const pass = viaScript(testCmd) ? " --" : "";
+  if (effectiveRunner === "jest") {
+    return {
+      command: `${testCmd}${pass} --findRelatedTests ${fileArgs} --passWithNoTests`,
+      narrowed: true,
+      selectedCount: sources.length,
+      reason: `jest --findRelatedTests on ${sources.length} changed file(s)`
+    };
+  }
+  if (effectiveRunner === "vitest" && !viaScript(testCmd)) {
+    return {
+      command: `vitest related ${fileArgs} --run`,
+      narrowed: true,
+      selectedCount: sources.length,
+      reason: `vitest related on ${sources.length} changed file(s)`
+    };
+  }
+  return full("cannot safely narrow this runner invocation \u2192 full suite");
+}
+
 // src/core/dismissals.ts
 function loadDismissals(proj2) {
   return readJSON(dismissalsPath(proj2), []);
@@ -21926,6 +22087,16 @@ function filterDismissed(findings, dismissals) {
 }
 
 // src/core/prioritize.ts
+function coverageLine(cov) {
+  if (!cov) return "";
+  const bits = [];
+  if (cov.filesChanged) bits.push(`${cov.filesReviewed}/${cov.filesChanged} changed files reviewed`);
+  if (cov.filesSkippedTooLarge.length) bits.push(`${cov.filesSkippedTooLarge.length} too large to fully review`);
+  if (cov.packagesScoped.length) bits.push(`packages: ${cov.packagesScoped.join(", ")}`);
+  if (cov.testsSelected != null) bits.push(`${cov.testsSelected} changed file(s) targeted for tests`);
+  if (cov.budgetHit) bits.push("time budget reached \u2014 coverage partial");
+  return bits.length ? `coverage: ${bits.join("; ")}` : "";
+}
 function clip(s, n) {
   if (!s) return "";
   const t = s.trim();
@@ -22009,9 +22180,15 @@ async function runPipeline(opts) {
       summary: "Vouch: no changes to verify"
     };
   }
+  const changedFiles = diff.files;
+  const ws = detectWorkspaces(proj2);
+  const scopedPkgs = ws.isMonorepo ? affectedPackages(changedFiles, ws.packages) : [];
+  let testsSelected = null;
+  const coverageNotes = [];
+  if (ws.isMonorepo) coverageNotes.push(`monorepo (${ws.tool}); ${scopedPkgs.length} package(s) affected`);
   let compileBroken = false;
   for (const tier of TIER_ORDER) {
-    const rc = cfg.commands[tier];
+    let rc = cfg.commands[tier];
     if (!cfg.tiers[tier]) continue;
     if (!rc || !rc.enabled || !rc.cmd) continue;
     if (compileBroken) {
@@ -22022,6 +22199,16 @@ async function runPipeline(opts) {
       budgetHit = true;
       skipped.push({ tier, reason: `time budget (${cfg.budgetSec}s) reached` });
       continue;
+    }
+    if (tier === "test" && cfg.tia.enabled && diff.isGit) {
+      const tia = selectTests({ proj: proj2, testCmd: rc.cmd, changedFiles, enabled: true });
+      if (tia.narrowed) {
+        rc = { ...rc, cmd: tia.command };
+        testsSelected = tia.selectedCount;
+        coverageNotes.push(`tests: ${tia.reason}`);
+      } else {
+        coverageNotes.push(`tests: ${tia.reason}`);
+      }
     }
     const blocking2 = cfg.enforcement.block && cfg.enforcement.blockOn.includes(tier);
     const run = await deps.runTier(tier, rc, proj2, cfg.commandTimeoutSec * 1e3, blocking2);
@@ -22071,10 +22258,10 @@ async function runPipeline(opts) {
     filesReviewed: built ? built.includedFiles.length : 0,
     filesSkippedTooLarge: built ? [...built.skippedFiles, ...built.clippedFiles] : [],
     chunksReviewed: built ? built.chunks.length : 0,
-    packagesScoped: [],
-    testsSelected: null,
+    packagesScoped: scopedPkgs.map((p) => p.name),
+    testsSelected,
     budgetHit,
-    notes: []
+    notes: coverageNotes
   };
   return {
     diffEmpty,
@@ -22091,19 +22278,19 @@ async function runPipeline(opts) {
 }
 
 // src/core/detect.ts
-var fs5 = __toESM(require("fs"));
-var path5 = __toESM(require("path"));
+var fs7 = __toESM(require("fs"));
+var path7 = __toESM(require("path"));
 function readJSONSafe(file) {
   try {
-    return JSON.parse(fs5.readFileSync(file, "utf8"));
+    return JSON.parse(fs7.readFileSync(file, "utf8"));
   } catch {
     return null;
   }
 }
-function detectPackageManager(proj2) {
-  if (fs5.existsSync(path5.join(proj2, "pnpm-lock.yaml"))) return "pnpm";
-  if (fs5.existsSync(path5.join(proj2, "yarn.lock"))) return "yarn";
-  if (fs5.existsSync(path5.join(proj2, "bun.lockb")) || fs5.existsSync(path5.join(proj2, "bun.lock"))) return "bun";
+function detectPackageManager2(proj2) {
+  if (fs7.existsSync(path7.join(proj2, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs7.existsSync(path7.join(proj2, "yarn.lock"))) return "yarn";
+  if (fs7.existsSync(path7.join(proj2, "bun.lockb")) || fs7.existsSync(path7.join(proj2, "bun.lock"))) return "bun";
   return "npm";
 }
 function runScript(pm, script) {
@@ -22116,12 +22303,12 @@ function detect(proj2) {
   const commands = {};
   const notes = [];
   const ecosystem = [];
-  const pkgPath = path5.join(proj2, "package.json");
-  if (fs5.existsSync(pkgPath)) {
+  const pkgPath = path7.join(proj2, "package.json");
+  if (fs7.existsSync(pkgPath)) {
     ecosystem.push("node");
     const pkg = readJSONSafe(pkgPath) ?? {};
     const scripts = pkg.scripts ?? {};
-    const pm = detectPackageManager(proj2);
+    const pm = detectPackageManager2(proj2);
     notes.push(`Detected Node project (package manager: ${pm}).`);
     const has = (name) => typeof scripts[name] === "string";
     if (has("test")) commands.test = { cmd: pm === "npm" ? "npm test" : runScript(pm, "test"), enabled: true };
@@ -22131,7 +22318,7 @@ function detect(proj2) {
       commands.typecheck = { cmd: runScript(pm, "typecheck"), enabled: true };
     } else if (has("tsc")) {
       commands.typecheck = { cmd: runScript(pm, "tsc"), enabled: true };
-    } else if (fs5.existsSync(path5.join(proj2, "tsconfig.json"))) {
+    } else if (fs7.existsSync(path7.join(proj2, "tsconfig.json"))) {
       const tscBin = pm === "npm" ? "npx tsc --noEmit" : pm === "bun" ? "bunx tsc --noEmit" : `${pm} exec tsc --noEmit`;
       commands.typecheck = { cmd: tscBin, enabled: true };
       notes.push("tsconfig.json present \u2192 suggested `tsc --noEmit` for type-checking.");
@@ -22140,12 +22327,12 @@ function detect(proj2) {
     else if (has("start")) commands.start = { cmd: runScript(pm, "start"), enabled: false };
   }
   const pyMarkers = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "tox.ini"];
-  const isPython = pyMarkers.some((m) => fs5.existsSync(path5.join(proj2, m)));
-  const hasTestsDir = fs5.existsSync(path5.join(proj2, "tests")) || fs5.existsSync(path5.join(proj2, "test"));
+  const isPython = pyMarkers.some((m) => fs7.existsSync(path7.join(proj2, m)));
+  const hasTestsDir = fs7.existsSync(path7.join(proj2, "tests")) || fs7.existsSync(path7.join(proj2, "test"));
   if (isPython || hasTestsDir) {
     ecosystem.push("python");
-    const pyproject = fs5.existsSync(path5.join(proj2, "pyproject.toml")) ? fs5.readFileSync(path5.join(proj2, "pyproject.toml"), "utf8") : "";
-    const reqs = fs5.existsSync(path5.join(proj2, "requirements.txt")) ? fs5.readFileSync(path5.join(proj2, "requirements.txt"), "utf8") : "";
+    const pyproject = fs7.existsSync(path7.join(proj2, "pyproject.toml")) ? fs7.readFileSync(path7.join(proj2, "pyproject.toml"), "utf8") : "";
+    const reqs = fs7.existsSync(path7.join(proj2, "requirements.txt")) ? fs7.readFileSync(path7.join(proj2, "requirements.txt"), "utf8") : "";
     const blob = (pyproject + "\n" + reqs).toLowerCase();
     if (!commands.test && (blob.includes("pytest") || hasTestsDir)) {
       commands.test = { cmd: "pytest -q", enabled: true };
@@ -22155,10 +22342,10 @@ function detect(proj2) {
     else if (!commands.lint && blob.includes("flake8")) commands.lint = { cmd: "flake8", enabled: true };
     if (!commands.typecheck && blob.includes("mypy")) commands.typecheck = { cmd: "mypy .", enabled: true };
   }
-  const makefile = path5.join(proj2, "Makefile");
-  if (fs5.existsSync(makefile)) {
+  const makefile = path7.join(proj2, "Makefile");
+  if (fs7.existsSync(makefile)) {
     ecosystem.push("make");
-    const mk = fs5.readFileSync(makefile, "utf8");
+    const mk = fs7.readFileSync(makefile, "utf8");
     const targets = new Set(
       mk.split("\n").map((l) => l.match(/^([a-zA-Z0-9_-]+):/)?.[1]).filter(Boolean)
     );
@@ -22173,7 +22360,7 @@ function detect(proj2) {
 }
 
 // src/mcp.ts
-var fs6 = __toESM(require("fs"));
+var fs8 = __toESM(require("fs"));
 function proj() {
   return process.env.CLAUDE_PROJECT_DIR || process.env.VOUCH_PROJECT_DIR || process.cwd();
 }
@@ -22223,6 +22410,8 @@ server.tool(
     if (!cfg) return text("Vouch is not set up for this repo yet. Run /vouch:setup (or call get_setup_suggestion then configure).");
     const result = await runPipeline({ proj: proj(), cfg, intent: loadActiveIntent(proj()), force: !!args.force });
     const out = [result.summary, `ran: ${result.ranTiers.join(", ") || "(none)"}`];
+    const cov = coverageLine(result.coverage);
+    if (cov) out.push(cov);
     if (result.skipped.length) out.push(`skipped: ${result.skipped.map((s) => `${s.tier} \u2014 ${s.reason}`).join("; ")}`);
     if (result.fixPrompt) out.push("\n" + result.fixPrompt);
     else {
@@ -22365,12 +22554,12 @@ server.tool(
     const marker = offPath(proj());
     if (args.enabled) {
       try {
-        if (exists(marker)) fs6.rmSync(marker);
+        if (exists(marker)) fs8.rmSync(marker);
       } catch {
       }
       return text("Vouch automatic verification RESUMED.");
     }
-    fs6.writeFileSync(marker, `paused ${nowISO()}
+    fs8.writeFileSync(marker, `paused ${nowISO()}
 `);
     return text("Vouch automatic verification PAUSED. Resume with /vouch:off (toggle) or set_enabled(true).");
   }

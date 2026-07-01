@@ -11,6 +11,7 @@ import { workingDiff } from './core/diff';
 import { readText, conventionsPath, findingsLogPath, writeJSON, exists, offPath } from './core/memory';
 import * as path from 'path';
 import { VerifyResult } from './core/types';
+import { coverageLine } from './core/prioritize';
 
 function resolveProj(stdinObj?: any): string {
   return (
@@ -175,6 +176,8 @@ async function verifyManual(): Promise<void> {
   writeFindingsLog(proj, result);
   const out: string[] = [result.summary];
   out.push(`ran: ${result.ranTiers.join(', ') || '(none)'}`);
+  const cov = coverageLine(result.coverage);
+  if (cov) out.push(cov);
   if (result.skipped.length) out.push(`skipped: ${result.skipped.map((s) => `${s.tier} (${s.reason})`).join('; ')}`);
   if (result.fixPrompt) {
     out.push('\n' + result.fixPrompt);

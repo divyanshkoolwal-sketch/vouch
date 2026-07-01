@@ -23,9 +23,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/eval/run.ts
-var fs4 = __toESM(require("fs"));
+var fs6 = __toESM(require("fs"));
 var os = __toESM(require("os"));
-var path5 = __toESM(require("path"));
+var path7 = __toESM(require("path"));
 var import_child_process4 = require("child_process");
 
 // src/eval/cases.ts
@@ -709,39 +709,200 @@ function buildChunks(perFile, cfg) {
   };
 }
 
-// src/core/memory.ts
+// src/core/workspaces.ts
 var fs3 = __toESM(require("fs"));
 var path3 = __toESM(require("path"));
-function vouchDir(proj) {
-  return path3.join(proj, ".vouch");
-}
-function runsDir(proj) {
-  return path3.join(vouchDir(proj), "runs");
-}
-function configPath(proj) {
-  return path3.join(vouchDir(proj), "config.json");
-}
-function intentDir(proj) {
-  return path3.join(vouchDir(proj), "intent");
-}
-function activeIntentPath(proj) {
-  return path3.join(intentDir(proj), "active.json");
-}
-function dismissalsPath(proj) {
-  return path3.join(vouchDir(proj), "dismissals.json");
-}
-function ensureVouchDir(proj) {
-  fs3.mkdirSync(runsDir(proj), { recursive: true });
-  fs3.mkdirSync(intentDir(proj), { recursive: true });
-  const gi = path3.join(vouchDir(proj), ".gitignore");
-  if (!fs3.existsSync(gi)) {
-    fs3.writeFileSync(gi, "runs/\n");
+function readJSON(file) {
+  try {
+    return JSON.parse(fs3.readFileSync(file, "utf8"));
+  } catch {
+    return null;
   }
 }
-function readJSON(file, fallback) {
+function detectPackageManager(proj) {
+  if (fs3.existsSync(path3.join(proj, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs3.existsSync(path3.join(proj, "yarn.lock"))) return "yarn";
+  if (fs3.existsSync(path3.join(proj, "bun.lockb")) || fs3.existsSync(path3.join(proj, "bun.lock"))) return "bun";
+  return "npm";
+}
+function expandGlob(proj, pattern) {
+  const clean = pattern.replace(/\/\*\*$/, "/*");
+  if (clean.endsWith("/*")) {
+    const base = clean.slice(0, -2);
+    const baseDir = path3.join(proj, base);
+    try {
+      return fs3.readdirSync(baseDir, { withFileTypes: true }).filter((d) => d.isDirectory() && fs3.existsSync(path3.join(baseDir, d.name, "package.json"))).map((d) => path3.join(base, d.name));
+    } catch {
+      return [];
+    }
+  }
+  return fs3.existsSync(path3.join(proj, clean, "package.json")) ? [clean] : [];
+}
+function pkgFromDir(proj, dir) {
+  const pj = readJSON(path3.join(proj, dir, "package.json"));
+  return { name: pj?.name || path3.basename(dir) || "root", dir };
+}
+function detectWorkspaces(proj) {
+  const pm = detectPackageManager(proj);
+  const rootPkg = readJSON(path3.join(proj, "package.json"));
+  let patterns = [];
+  let tool = "none";
+  const pnpmWs = path3.join(proj, "pnpm-workspace.yaml");
+  if (fs3.existsSync(pnpmWs)) {
+    tool = "pnpm";
+    const txt = fs3.readFileSync(pnpmWs, "utf8");
+    let inPkgs = false;
+    for (const line of txt.split("\n")) {
+      if (/^packages:/.test(line)) {
+        inPkgs = true;
+        continue;
+      }
+      if (inPkgs) {
+        const m = line.match(/^\s*-\s*['"]?([^'"]+)['"]?\s*$/);
+        if (m) patterns.push(m[1]);
+        else if (/^\S/.test(line)) break;
+      }
+    }
+  }
+  if (!patterns.length && rootPkg?.workspaces) {
+    const ws = Array.isArray(rootPkg.workspaces) ? rootPkg.workspaces : rootPkg.workspaces.packages;
+    if (Array.isArray(ws)) {
+      patterns = ws;
+      tool = pm;
+    }
+  }
+  if (fs3.existsSync(path3.join(proj, "nx.json"))) tool = "nx";
+  else if (fs3.existsSync(path3.join(proj, "turbo.json"))) tool = "turbo";
+  else if (fs3.existsSync(path3.join(proj, "lerna.json")) && tool === "none") tool = "lerna";
+  const dirs = /* @__PURE__ */ new Set();
+  for (const p of patterns) for (const d of expandGlob(proj, p)) dirs.add(d);
+  if (!dirs.size) {
+    const cargo = readCargoWorkspace(proj);
+    if (cargo.length) return { isMonorepo: true, tool: "cargo", packageManager: pm, packages: cargo };
+    if (fs3.existsSync(path3.join(proj, "go.work"))) return { isMonorepo: true, tool: "go", packageManager: pm, packages: [] };
+  }
+  const packages = [...dirs].sort().map((d) => pkgFromDir(proj, d));
+  return { isMonorepo: packages.length > 0, tool: packages.length ? tool : "none", packageManager: pm, packages };
+}
+function readCargoWorkspace(proj) {
+  const cargo = path3.join(proj, "Cargo.toml");
+  if (!fs3.existsSync(cargo)) return [];
+  const txt = fs3.readFileSync(cargo, "utf8");
+  if (!/\[workspace\]/.test(txt)) return [];
+  const m = txt.match(/members\s*=\s*\[([^\]]*)\]/);
+  if (!m) return [];
+  const members = [...m[1].matchAll(/["']([^"']+)["']/g)].map((x) => x[1]);
+  const dirs = /* @__PURE__ */ new Set();
+  for (const p of members) for (const d of expandGlob(proj, p)) dirs.add(d);
+  return [...dirs].map((d) => ({ name: path3.basename(d), dir: d }));
+}
+function affectedPackages(changedFiles, packages) {
+  const byDirLen = [...packages].sort((a, b) => b.dir.length - a.dir.length);
+  const hit = /* @__PURE__ */ new Map();
+  for (const f of changedFiles) {
+    for (const p of byDirLen) {
+      if (p.dir === "" || f === p.dir || f.startsWith(p.dir + "/")) {
+        hit.set(p.dir, p);
+        break;
+      }
+    }
+  }
+  return [...hit.values()];
+}
+
+// src/core/tia.ts
+var fs4 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
+var ROOT_PATTERNS = [
+  /(^|\/)package\.json$/,
+  /(^|\/)[^/]*lock[^/]*$/i,
+  /(^|\/)tsconfig[^/]*\.json$/,
+  /(^|\/)(jest|vitest|vite|babel|tsup|rollup|webpack)\.config\.[cm]?[jt]s$/,
+  /(^|\/)\.?eslintrc/,
+  /(^|\/)(jest|vitest)\.setup\.[cm]?[jt]s$/
+];
+var CODE_RE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
+function detectRunner(cmd) {
+  if (/\bvitest\b/.test(cmd)) return "vitest";
+  if (/\bjest\b/.test(cmd)) return "jest";
+  return null;
+}
+function viaScript(cmd) {
+  return /^(npm|pnpm|yarn|bun)\b/.test(cmd.trim());
+}
+function selectTests(opts) {
+  const { proj, testCmd, changedFiles, enabled } = opts;
+  const full = (reason) => ({ command: testCmd, narrowed: false, selectedCount: null, reason });
+  if (!enabled) return full("TIA disabled");
+  const runner = detectRunner(testCmd);
+  let effectiveRunner = runner;
+  if (!effectiveRunner && viaScript(testCmd)) {
+    try {
+      const pj = JSON.parse(fs4.readFileSync(path4.join(proj, "package.json"), "utf8"));
+      effectiveRunner = detectRunner(String(pj?.scripts?.test ?? ""));
+    } catch {
+    }
+  }
+  if (!effectiveRunner) return full("unrecognized test runner \u2192 full suite");
+  if (changedFiles.some((f) => ROOT_PATTERNS.some((re) => re.test(f)))) {
+    return full("a root/config file changed \u2192 full suite");
+  }
+  const sources = changedFiles.filter((f) => CODE_RE.test(f) && fs4.existsSync(path4.join(proj, f)));
+  if (sources.length === 0) return full("no changed source files to target \u2192 full suite");
+  const fileArgs = sources.map((f) => JSON.stringify(f)).join(" ");
+  const pass = viaScript(testCmd) ? " --" : "";
+  if (effectiveRunner === "jest") {
+    return {
+      command: `${testCmd}${pass} --findRelatedTests ${fileArgs} --passWithNoTests`,
+      narrowed: true,
+      selectedCount: sources.length,
+      reason: `jest --findRelatedTests on ${sources.length} changed file(s)`
+    };
+  }
+  if (effectiveRunner === "vitest" && !viaScript(testCmd)) {
+    return {
+      command: `vitest related ${fileArgs} --run`,
+      narrowed: true,
+      selectedCount: sources.length,
+      reason: `vitest related on ${sources.length} changed file(s)`
+    };
+  }
+  return full("cannot safely narrow this runner invocation \u2192 full suite");
+}
+
+// src/core/memory.ts
+var fs5 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
+function vouchDir(proj) {
+  return path5.join(proj, ".vouch");
+}
+function runsDir(proj) {
+  return path5.join(vouchDir(proj), "runs");
+}
+function configPath(proj) {
+  return path5.join(vouchDir(proj), "config.json");
+}
+function intentDir(proj) {
+  return path5.join(vouchDir(proj), "intent");
+}
+function activeIntentPath(proj) {
+  return path5.join(intentDir(proj), "active.json");
+}
+function dismissalsPath(proj) {
+  return path5.join(vouchDir(proj), "dismissals.json");
+}
+function ensureVouchDir(proj) {
+  fs5.mkdirSync(runsDir(proj), { recursive: true });
+  fs5.mkdirSync(intentDir(proj), { recursive: true });
+  const gi = path5.join(vouchDir(proj), ".gitignore");
+  if (!fs5.existsSync(gi)) {
+    fs5.writeFileSync(gi, "runs/\n");
+  }
+}
+function readJSON2(file, fallback) {
   try {
-    if (!fs3.existsSync(file)) return fallback;
-    const raw = fs3.readFileSync(file, "utf8");
+    if (!fs5.existsSync(file)) return fallback;
+    const raw = fs5.readFileSync(file, "utf8");
     if (!raw.trim()) return fallback;
     return JSON.parse(raw);
   } catch {
@@ -749,12 +910,12 @@ function readJSON(file, fallback) {
   }
 }
 function writeJSON(file, obj) {
-  fs3.mkdirSync(path3.dirname(file), { recursive: true });
-  fs3.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n");
+  fs5.mkdirSync(path5.dirname(file), { recursive: true });
+  fs5.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n");
 }
 function exists(file) {
   try {
-    return fs3.existsSync(file);
+    return fs5.existsSync(file);
   } catch {
     return false;
   }
@@ -762,7 +923,7 @@ function exists(file) {
 
 // src/core/dismissals.ts
 function loadDismissals(proj) {
-  return readJSON(dismissalsPath(proj), []);
+  return readJSON2(dismissalsPath(proj), []);
 }
 function filterDismissed(findings, dismissals) {
   const set = new Set(dismissals.map((d) => d.fingerprint));
@@ -853,9 +1014,15 @@ async function runPipeline(opts) {
       summary: "Vouch: no changes to verify"
     };
   }
+  const changedFiles = diff.files;
+  const ws = detectWorkspaces(proj);
+  const scopedPkgs = ws.isMonorepo ? affectedPackages(changedFiles, ws.packages) : [];
+  let testsSelected = null;
+  const coverageNotes = [];
+  if (ws.isMonorepo) coverageNotes.push(`monorepo (${ws.tool}); ${scopedPkgs.length} package(s) affected`);
   let compileBroken = false;
   for (const tier of TIER_ORDER) {
-    const rc = cfg.commands[tier];
+    let rc = cfg.commands[tier];
     if (!cfg.tiers[tier]) continue;
     if (!rc || !rc.enabled || !rc.cmd) continue;
     if (compileBroken) {
@@ -866,6 +1033,16 @@ async function runPipeline(opts) {
       budgetHit = true;
       skipped.push({ tier, reason: `time budget (${cfg.budgetSec}s) reached` });
       continue;
+    }
+    if (tier === "test" && cfg.tia.enabled && diff.isGit) {
+      const tia = selectTests({ proj, testCmd: rc.cmd, changedFiles, enabled: true });
+      if (tia.narrowed) {
+        rc = { ...rc, cmd: tia.command };
+        testsSelected = tia.selectedCount;
+        coverageNotes.push(`tests: ${tia.reason}`);
+      } else {
+        coverageNotes.push(`tests: ${tia.reason}`);
+      }
     }
     const blocking2 = cfg.enforcement.block && cfg.enforcement.blockOn.includes(tier);
     const run = await deps.runTier(tier, rc, proj, cfg.commandTimeoutSec * 1e3, blocking2);
@@ -915,10 +1092,10 @@ async function runPipeline(opts) {
     filesReviewed: built ? built.includedFiles.length : 0,
     filesSkippedTooLarge: built ? [...built.skippedFiles, ...built.clippedFiles] : [],
     chunksReviewed: built ? built.chunks.length : 0,
-    packagesScoped: [],
-    testsSelected: null,
+    packagesScoped: scopedPkgs.map((p) => p.name),
+    testsSelected,
     budgetHit,
-    notes: []
+    notes: coverageNotes
   };
   return {
     diffEmpty,
@@ -984,10 +1161,10 @@ function saveConfig(proj, cfg) {
 }
 
 // src/core/intent.ts
-var path4 = __toESM(require("path"));
+var path6 = __toESM(require("path"));
 function loadActiveIntent(proj) {
   if (!exists(activeIntentPath(proj))) return null;
-  const r = readJSON(activeIntentPath(proj), null);
+  const r = readJSON2(activeIntentPath(proj), null);
   if (!r || r.status !== "active") return null;
   return r;
 }
@@ -1001,7 +1178,7 @@ function recordIntent(proj, input, nowISO) {
   const prev = loadActiveIntent(proj);
   if (prev) {
     prev.status = "archived";
-    writeJSON(path4.join(intentDir(proj), `${prev.id}.json`), prev);
+    writeJSON(path6.join(intentDir(proj), `${prev.id}.json`), prev);
   }
   const record = {
     id: newId(nowISO),
@@ -1023,14 +1200,14 @@ function sh(proj, args) {
   (0, import_child_process4.execFileSync)("git", args, { cwd: proj, stdio: "ignore" });
 }
 function setupCase(c) {
-  const proj = fs4.mkdtempSync(path5.join(os.tmpdir(), "vouch-eval-"));
+  const proj = fs6.mkdtempSync(path7.join(os.tmpdir(), "vouch-eval-"));
   sh(proj, ["init", "-q"]);
   sh(proj, ["config", "user.email", "e@e.e"]);
   sh(proj, ["config", "user.name", "e"]);
-  for (const [f, content] of Object.entries(c.baseline)) fs4.writeFileSync(path5.join(proj, f), content);
+  for (const [f, content] of Object.entries(c.baseline)) fs6.writeFileSync(path7.join(proj, f), content);
   sh(proj, ["add", "-A"]);
   sh(proj, ["commit", "-qm", "baseline"]);
-  for (const [f, content] of Object.entries(c.change)) fs4.writeFileSync(path5.join(proj, f), content);
+  for (const [f, content] of Object.entries(c.change)) fs6.writeFileSync(path7.join(proj, f), content);
   const cfg = defaultConfig();
   cfg.tiers = { typecheck: false, lint: false, build: false, test: false, intent: true, smoke: false };
   const mode = process.env.VOUCH_EVAL_MODE || "bounded";
@@ -1057,7 +1234,7 @@ async function main() {
       cfg.tiers = { typecheck: false, lint: false, build: false, test: false, intent: true, smoke: false };
       cfg.mode = process.env.VOUCH_EVAL_MODE || "bounded";
       if (cfg.mode === "bounded") cfg.review.quorumN = 1;
-      const intent = JSON.parse(fs4.readFileSync(path5.join(proj, ".vouch/intent/active.json"), "utf8"));
+      const intent = JSON.parse(fs6.readFileSync(path7.join(proj, ".vouch/intent/active.json"), "utf8"));
       const res = await runPipeline({ proj, cfg, intent, force: true });
       const surfaced = [...res.blocking, ...res.questions];
       flagged = surfaced.length > 0;
@@ -1065,7 +1242,7 @@ async function main() {
     } catch (e) {
       detail = "ERROR " + (e?.message ?? e);
     } finally {
-      fs4.rmSync(proj, { recursive: true, force: true });
+      fs6.rmSync(proj, { recursive: true, force: true });
     }
     const correct = c.expect === "flag" === flagged;
     if (c.expect === "flag") flagged ? tp++ : fn++;

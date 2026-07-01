@@ -1,6 +1,18 @@
 // Collapse all findings into ONE prioritized, actionable message for the agent:
 // verified failures first (with repro + evidence), then uncertain questions.
-import { Finding } from './types';
+import { Finding, CoverageReport } from './types';
+
+/** One-line honest coverage summary — never conflate "clean" with "skipped". */
+export function coverageLine(cov?: CoverageReport): string {
+  if (!cov) return '';
+  const bits: string[] = [];
+  if (cov.filesChanged) bits.push(`${cov.filesReviewed}/${cov.filesChanged} changed files reviewed`);
+  if (cov.filesSkippedTooLarge.length) bits.push(`${cov.filesSkippedTooLarge.length} too large to fully review`);
+  if (cov.packagesScoped.length) bits.push(`packages: ${cov.packagesScoped.join(', ')}`);
+  if (cov.testsSelected != null) bits.push(`${cov.testsSelected} changed file(s) targeted for tests`);
+  if (cov.budgetHit) bits.push('time budget reached — coverage partial');
+  return bits.length ? `coverage: ${bits.join('; ')}` : '';
+}
 
 function clip(s: string | undefined, n: number): string {
   if (!s) return '';

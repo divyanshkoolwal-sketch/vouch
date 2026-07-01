@@ -51,23 +51,23 @@ When a finding is a genuine non‑issue, dismiss it (by its `vouch id`) and Vouc
 ## How it works
 
 ```
-intent → agent writes code → [you stop] → Stop hook fires (only if code changed)
+intent → agent writes code → [you stop] → Stop hook (only if the diff changed)
                                               │
-                                   ┌──────────┴───────────┐
-                                   │  verification pipeline │
-                                   ├────────────────────────┤
-   Tier 1 (facts, fast→slow): typecheck → lint → build → test   (deterministic; can block)
-   Tier 2 (questions): independent `claude -p` review of the diff vs the intent  (never blocks by default)
-   Tier 3 (experimental, opt‑in): web smoke                       (non‑blocking; not yet enabled)
-                                   └────────────┬───────────┘
-                          blocking facts?  ──► block + ONE fix‑prompt ──► agent fixes ──► re‑verify
-                          clean / only questions? ──► allow stop (+ surface questions)
+   Scope:      merge-base diff + --function-context; monorepo → affected packages
+   Tier 1:     typecheck → lint → build → test   (facts; TEST TIER narrowed by test-impact analysis)
+   Tier 2:     grounded review of the diff vs intent →
+                 MAP (parallel, per chunk, quote-first)  →  REDUCE (dedupe/rank)
+                 →  EVIDENCE GATE (drop findings whose quote isn't literally in the code)
+                 →  CoVe QUORUM (N independent skeptics refute-by-default; keep only confirmed)
+                                              │
+              blocking facts? ─► block + ONE grounded fix-prompt ─► agent fixes ─► re-verify (loop, capped)
+              clean / only questions? ─► allow stop (+ surface questions + honest coverage)
 ```
 
-- **The brain is one shared core.** Hooks are separate processes that can't call MCP, so all logic lives in `src/core/` and is reached two ways: the **MCP server** (`dist/mcp.js`, the interactive tools) and a **CLI** (`dist/cli.js`, invoked by the hooks).
-- **Change‑gated.** `PostToolUse` only sets a cheap dirty flag. The real work runs on **Stop**, and only when the git diff actually changed — so verification doesn't fire on unrelated stops. Vouch never diffs or reviews its own `.vouch/` memory.
-- **Independent reviewer.** Tier 2 spawns a fresh, read‑only `claude -p` with no stake in the original code (a self‑reviewing agent rationalizes its own work). It inherits your existing auth and runs with `VOUCH_DISABLE=1` so it can't recursively trigger Vouch's own hooks.
-- **Bounded loop.** The block→fix→re‑verify loop is capped (default 3) via the Stop hook's `stop_hook_active` signal, with `/vouch:off` as a kill switch.
+- **Two deterministic gates carry the accuracy.** Research is clear that un-grounded self-critique *lowers* accuracy, and models mis-cite ~50% of the time — so the guarantees are non-LLM: (1) the **evidence gate** drops any behavioral finding whose quoted code isn't literally present; (2) the **CoVe quorum** keeps a finding only if a majority of *independent* skeptics (who can't see the original claim) confirm it against the real code. The LLM improves candidate quality; the gates guarantee low false positives.
+- **Scales without truncation.** Big changes are chunked and reviewed in parallel (map-reduce) with absolute line numbers, never truncated. Monorepos are scoped to affected packages; the test tier runs only affected tests (with a safe fallback to the full suite on any root-file change). Everything Vouch couldn't fully cover is reported — never conflated with "clean."
+- **The brain is one shared core.** Hooks can't call MCP, so all logic lives in `src/core/` and is reached two ways: the **MCP server** (`dist/mcp.js`) and a **CLI** (`dist/cli.js`, invoked by the hooks).
+- **Independent + bounded.** The reviewer is a fresh read-only `claude -p` (no stake in the code, inherits your auth, `VOUCH_DISABLE=1` prevents hook recursion). The block→fix→re-verify loop is capped (default 3) via `stop_hook_active`, with `/vouch:off` as a kill switch.
 
 ### Facts vs. questions vs. notices
 | Class | Source | Blocks? |
@@ -96,10 +96,21 @@ intent → agent writes code → [you stop] → Stop hook fires (only if code ch
     "maxIterations": 3
   },
   "reviewer": { "model": null, "timeoutSec": 90 }, // model: null = inherit your default; set e.g. a faster model to cut cost
+  "mode": "thorough",                // thorough (max accuracy, default) | bounded | fast
+  "review": {
+    "concurrency": 4,                // max parallel review calls
+    "quorumN": 3,                    // independent CoVe verification votes per finding
+    "chunkTokenBudget": 6000,        // per-chunk size before splitting
+    "maxReviewFiles": 40,            // hard cap; excess reported as skipped
+    "minConfidence": 0.5             // drop verified findings below this
+  },
+  "tia": { "enabled": true },        // run only tests affected by the change (safe fallback to full)
   "commandTimeoutSec": 90,
-  "budgetSec": 150
+  "budgetSec": 240                   // pipeline degrades honestly if exceeded (never silently truncates)
 }
 ```
+
+`mode`: **thorough** (default) = full map-reduce + N-vote verification (max accuracy); **bounded** = single verification vote; **fast** = evidence gate only, no independent verification.
 
 ### Repo memory (`.vouch/`)
 ```
@@ -116,11 +127,15 @@ intent → agent writes code → [you stop] → Stop hook fires (only if code ch
 ## MCP tools (server `vouch`)
 `record_intent`, `get_active_intent`, `clear_intent`, `verify`, `dismiss_finding`, `record_convention`, `get_setup_suggestion`, `get_config`, `configure`, `get_status`, `set_enabled`.
 
+## Measuring accuracy
+`npm run eval` runs the review pipeline over a golden set (`src/eval/cases.ts`: correct diffs, seeded defects, and correct-but-unusual "hard negatives") and prints a confusion matrix + false-positive rate, failing if effective-FP exceeds **10%** (Google's "developers will disable it" threshold) or recall drops below the floor. This is how "accuracy" is a measured number here, not a claim. Add your own cases to tune the reviewer for your repo.
+
 ## Limitations & roadmap
-- **v1 targets Claude Code.** The memory format and core are tool‑agnostic by design; a Codex adapter is future work.
-- **Tier 2 needs git** (to scope a diff) and the `claude` CLI (for the independent reviewer). Both degrade gracefully when absent.
-- **Web smoke (Tier 3)** — boot the app and load changed routes headlessly, failing only on crashes/5xx/console errors — is designed and reserved but not yet enabled. Full intent‑driven Playwright E2E is intentionally out of v1 (it's the largest false‑positive risk).
-- Auto‑detection covers Node/TS + Python today; other ecosystems work via manual config.
+- **Targets Claude Code.** The memory format and core are tool-agnostic by design; a Codex adapter is future work.
+- **Tier 2 needs git** (to scope a diff) and the `claude` CLI (independent reviewer). Both degrade gracefully when absent.
+- **Test-impact analysis** covers jest & vitest today (safe-fallback to the full suite otherwise). Monorepo detection covers JS/TS workspaces (pnpm/yarn/npm/bun, Nx/Turbo/Lerna) + Cargo/Go for reporting.
+- **Deferred (next wave):** a tree-sitter repo-map for orientation on very large repos (the agentic reviewer already gathers context via grep/read + function-context, so this is an enhancement, not a blocker); generating *executable* checks from intent (turning behavioral opinions into deterministic facts); fix-guided verification in a scratch worktree; an LSP precision layer; web/Playwright smoke.
+- Auto-detection covers Node/TS + Python; other ecosystems work via manual config.
 
 ---
 
@@ -129,8 +144,9 @@ intent → agent writes code → [you stop] → Stop hook fires (only if code ch
 ```bash
 npm install
 npm run typecheck     # tsc --noEmit
-npm run build         # esbuild bundles src/{mcp,cli}.ts → dist/ (CJS, dependency-free)
-npm test              # vitest
+npm run build         # esbuild bundles src/{mcp,cli,eval} → dist/ (CJS, dependency-free)
+npm test              # vitest (73 unit/integration tests)
+npm run eval          # precision/recall over the golden set (real reviewer; ~minutes)
 ```
 
 Vouch dogfoods its own design: the pipeline's decision logic, detection, fingerprinting, dismissals, prioritization, and the real‑git diff are all covered by the test suite. Iterate on a loaded plugin with `/reload-plugins`.

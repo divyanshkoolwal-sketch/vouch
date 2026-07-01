@@ -792,6 +792,167 @@ function buildChunks(perFile, cfg) {
   };
 }
 
+// src/core/workspaces.ts
+var fs4 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
+function readJSON2(file) {
+  try {
+    return JSON.parse(fs4.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function detectPackageManager(proj) {
+  if (fs4.existsSync(path4.join(proj, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs4.existsSync(path4.join(proj, "yarn.lock"))) return "yarn";
+  if (fs4.existsSync(path4.join(proj, "bun.lockb")) || fs4.existsSync(path4.join(proj, "bun.lock"))) return "bun";
+  return "npm";
+}
+function expandGlob(proj, pattern) {
+  const clean = pattern.replace(/\/\*\*$/, "/*");
+  if (clean.endsWith("/*")) {
+    const base = clean.slice(0, -2);
+    const baseDir = path4.join(proj, base);
+    try {
+      return fs4.readdirSync(baseDir, { withFileTypes: true }).filter((d) => d.isDirectory() && fs4.existsSync(path4.join(baseDir, d.name, "package.json"))).map((d) => path4.join(base, d.name));
+    } catch {
+      return [];
+    }
+  }
+  return fs4.existsSync(path4.join(proj, clean, "package.json")) ? [clean] : [];
+}
+function pkgFromDir(proj, dir) {
+  const pj = readJSON2(path4.join(proj, dir, "package.json"));
+  return { name: pj?.name || path4.basename(dir) || "root", dir };
+}
+function detectWorkspaces(proj) {
+  const pm = detectPackageManager(proj);
+  const rootPkg = readJSON2(path4.join(proj, "package.json"));
+  let patterns = [];
+  let tool = "none";
+  const pnpmWs = path4.join(proj, "pnpm-workspace.yaml");
+  if (fs4.existsSync(pnpmWs)) {
+    tool = "pnpm";
+    const txt = fs4.readFileSync(pnpmWs, "utf8");
+    let inPkgs = false;
+    for (const line of txt.split("\n")) {
+      if (/^packages:/.test(line)) {
+        inPkgs = true;
+        continue;
+      }
+      if (inPkgs) {
+        const m = line.match(/^\s*-\s*['"]?([^'"]+)['"]?\s*$/);
+        if (m) patterns.push(m[1]);
+        else if (/^\S/.test(line)) break;
+      }
+    }
+  }
+  if (!patterns.length && rootPkg?.workspaces) {
+    const ws = Array.isArray(rootPkg.workspaces) ? rootPkg.workspaces : rootPkg.workspaces.packages;
+    if (Array.isArray(ws)) {
+      patterns = ws;
+      tool = pm;
+    }
+  }
+  if (fs4.existsSync(path4.join(proj, "nx.json"))) tool = "nx";
+  else if (fs4.existsSync(path4.join(proj, "turbo.json"))) tool = "turbo";
+  else if (fs4.existsSync(path4.join(proj, "lerna.json")) && tool === "none") tool = "lerna";
+  const dirs = /* @__PURE__ */ new Set();
+  for (const p of patterns) for (const d of expandGlob(proj, p)) dirs.add(d);
+  if (!dirs.size) {
+    const cargo = readCargoWorkspace(proj);
+    if (cargo.length) return { isMonorepo: true, tool: "cargo", packageManager: pm, packages: cargo };
+    if (fs4.existsSync(path4.join(proj, "go.work"))) return { isMonorepo: true, tool: "go", packageManager: pm, packages: [] };
+  }
+  const packages = [...dirs].sort().map((d) => pkgFromDir(proj, d));
+  return { isMonorepo: packages.length > 0, tool: packages.length ? tool : "none", packageManager: pm, packages };
+}
+function readCargoWorkspace(proj) {
+  const cargo = path4.join(proj, "Cargo.toml");
+  if (!fs4.existsSync(cargo)) return [];
+  const txt = fs4.readFileSync(cargo, "utf8");
+  if (!/\[workspace\]/.test(txt)) return [];
+  const m = txt.match(/members\s*=\s*\[([^\]]*)\]/);
+  if (!m) return [];
+  const members = [...m[1].matchAll(/["']([^"']+)["']/g)].map((x) => x[1]);
+  const dirs = /* @__PURE__ */ new Set();
+  for (const p of members) for (const d of expandGlob(proj, p)) dirs.add(d);
+  return [...dirs].map((d) => ({ name: path4.basename(d), dir: d }));
+}
+function affectedPackages(changedFiles, packages) {
+  const byDirLen = [...packages].sort((a, b) => b.dir.length - a.dir.length);
+  const hit = /* @__PURE__ */ new Map();
+  for (const f of changedFiles) {
+    for (const p of byDirLen) {
+      if (p.dir === "" || f === p.dir || f.startsWith(p.dir + "/")) {
+        hit.set(p.dir, p);
+        break;
+      }
+    }
+  }
+  return [...hit.values()];
+}
+
+// src/core/tia.ts
+var fs5 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
+var ROOT_PATTERNS = [
+  /(^|\/)package\.json$/,
+  /(^|\/)[^/]*lock[^/]*$/i,
+  /(^|\/)tsconfig[^/]*\.json$/,
+  /(^|\/)(jest|vitest|vite|babel|tsup|rollup|webpack)\.config\.[cm]?[jt]s$/,
+  /(^|\/)\.?eslintrc/,
+  /(^|\/)(jest|vitest)\.setup\.[cm]?[jt]s$/
+];
+var CODE_RE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
+function detectRunner(cmd) {
+  if (/\bvitest\b/.test(cmd)) return "vitest";
+  if (/\bjest\b/.test(cmd)) return "jest";
+  return null;
+}
+function viaScript(cmd) {
+  return /^(npm|pnpm|yarn|bun)\b/.test(cmd.trim());
+}
+function selectTests(opts) {
+  const { proj, testCmd, changedFiles, enabled } = opts;
+  const full = (reason) => ({ command: testCmd, narrowed: false, selectedCount: null, reason });
+  if (!enabled) return full("TIA disabled");
+  const runner = detectRunner(testCmd);
+  let effectiveRunner = runner;
+  if (!effectiveRunner && viaScript(testCmd)) {
+    try {
+      const pj = JSON.parse(fs5.readFileSync(path5.join(proj, "package.json"), "utf8"));
+      effectiveRunner = detectRunner(String(pj?.scripts?.test ?? ""));
+    } catch {
+    }
+  }
+  if (!effectiveRunner) return full("unrecognized test runner \u2192 full suite");
+  if (changedFiles.some((f) => ROOT_PATTERNS.some((re) => re.test(f)))) {
+    return full("a root/config file changed \u2192 full suite");
+  }
+  const sources = changedFiles.filter((f) => CODE_RE.test(f) && fs5.existsSync(path5.join(proj, f)));
+  if (sources.length === 0) return full("no changed source files to target \u2192 full suite");
+  const fileArgs = sources.map((f) => JSON.stringify(f)).join(" ");
+  const pass = viaScript(testCmd) ? " --" : "";
+  if (effectiveRunner === "jest") {
+    return {
+      command: `${testCmd}${pass} --findRelatedTests ${fileArgs} --passWithNoTests`,
+      narrowed: true,
+      selectedCount: sources.length,
+      reason: `jest --findRelatedTests on ${sources.length} changed file(s)`
+    };
+  }
+  if (effectiveRunner === "vitest" && !viaScript(testCmd)) {
+    return {
+      command: `vitest related ${fileArgs} --run`,
+      narrowed: true,
+      selectedCount: sources.length,
+      reason: `vitest related on ${sources.length} changed file(s)`
+    };
+  }
+  return full("cannot safely narrow this runner invocation \u2192 full suite");
+}
+
 // src/core/dismissals.ts
 function loadDismissals(proj) {
   return readJSON(dismissalsPath(proj), []);
@@ -802,6 +963,16 @@ function filterDismissed(findings, dismissals) {
 }
 
 // src/core/prioritize.ts
+function coverageLine(cov) {
+  if (!cov) return "";
+  const bits = [];
+  if (cov.filesChanged) bits.push(`${cov.filesReviewed}/${cov.filesChanged} changed files reviewed`);
+  if (cov.filesSkippedTooLarge.length) bits.push(`${cov.filesSkippedTooLarge.length} too large to fully review`);
+  if (cov.packagesScoped.length) bits.push(`packages: ${cov.packagesScoped.join(", ")}`);
+  if (cov.testsSelected != null) bits.push(`${cov.testsSelected} changed file(s) targeted for tests`);
+  if (cov.budgetHit) bits.push("time budget reached \u2014 coverage partial");
+  return bits.length ? `coverage: ${bits.join("; ")}` : "";
+}
 function clip(s, n) {
   if (!s) return "";
   const t = s.trim();
@@ -885,9 +1056,15 @@ async function runPipeline(opts) {
       summary: "Vouch: no changes to verify"
     };
   }
+  const changedFiles = diff.files;
+  const ws = detectWorkspaces(proj);
+  const scopedPkgs = ws.isMonorepo ? affectedPackages(changedFiles, ws.packages) : [];
+  let testsSelected = null;
+  const coverageNotes = [];
+  if (ws.isMonorepo) coverageNotes.push(`monorepo (${ws.tool}); ${scopedPkgs.length} package(s) affected`);
   let compileBroken = false;
   for (const tier of TIER_ORDER) {
-    const rc = cfg.commands[tier];
+    let rc = cfg.commands[tier];
     if (!cfg.tiers[tier]) continue;
     if (!rc || !rc.enabled || !rc.cmd) continue;
     if (compileBroken) {
@@ -898,6 +1075,16 @@ async function runPipeline(opts) {
       budgetHit = true;
       skipped.push({ tier, reason: `time budget (${cfg.budgetSec}s) reached` });
       continue;
+    }
+    if (tier === "test" && cfg.tia.enabled && diff.isGit) {
+      const tia = selectTests({ proj, testCmd: rc.cmd, changedFiles, enabled: true });
+      if (tia.narrowed) {
+        rc = { ...rc, cmd: tia.command };
+        testsSelected = tia.selectedCount;
+        coverageNotes.push(`tests: ${tia.reason}`);
+      } else {
+        coverageNotes.push(`tests: ${tia.reason}`);
+      }
     }
     const blocking2 = cfg.enforcement.block && cfg.enforcement.blockOn.includes(tier);
     const run = await deps.runTier(tier, rc, proj, cfg.commandTimeoutSec * 1e3, blocking2);
@@ -947,10 +1134,10 @@ async function runPipeline(opts) {
     filesReviewed: built ? built.includedFiles.length : 0,
     filesSkippedTooLarge: built ? [...built.skippedFiles, ...built.clippedFiles] : [],
     chunksReviewed: built ? built.chunks.length : 0,
-    packagesScoped: [],
-    testsSelected: null,
+    packagesScoped: scopedPkgs.map((p) => p.name),
+    testsSelected,
     budgetHit,
-    notes: []
+    notes: coverageNotes
   };
   return {
     diffEmpty,
@@ -967,35 +1154,35 @@ async function runPipeline(opts) {
 }
 
 // src/core/runState.ts
-var fs4 = __toESM(require("fs"));
+var fs6 = __toESM(require("fs"));
 function loadState(proj) {
   return readJSON(statePath(proj), { lastDiffHash: null, iteration: 0 });
 }
 function saveState(proj, state) {
-  fs4.mkdirSync(runsDir(proj), { recursive: true });
+  fs6.mkdirSync(runsDir(proj), { recursive: true });
   writeJSON(statePath(proj), state);
 }
 function isDirty(proj) {
   try {
-    return fs4.existsSync(dirtyPath(proj)) && fs4.statSync(dirtyPath(proj)).size > 0;
+    return fs6.existsSync(dirtyPath(proj)) && fs6.statSync(dirtyPath(proj)).size > 0;
   } catch {
     return false;
   }
 }
 function clearDirty(proj) {
   try {
-    if (fs4.existsSync(dirtyPath(proj))) fs4.rmSync(dirtyPath(proj));
+    if (fs6.existsSync(dirtyPath(proj))) fs6.rmSync(dirtyPath(proj));
   } catch {
   }
 }
 function markDirty(proj) {
-  fs4.mkdirSync(runsDir(proj), { recursive: true });
-  fs4.appendFileSync(dirtyPath(proj), `${Date.now()}
+  fs6.mkdirSync(runsDir(proj), { recursive: true });
+  fs6.appendFileSync(dirtyPath(proj), `${Date.now()}
 `);
 }
 
 // src/cli.ts
-var path4 = __toESM(require("path"));
+var path6 = __toESM(require("path"));
 function resolveProj(stdinObj) {
   return process.env.VOUCH_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR || (stdinObj && typeof stdinObj.cwd === "string" ? stdinObj.cwd : "") || process.cwd();
 }
@@ -1031,7 +1218,7 @@ function writeFindingsLog(proj, result) {
   }
 }
 function looksLikeProject(proj) {
-  return exists(path4.join(proj, ".git")) || exists(path4.join(proj, "package.json")) || exists(path4.join(proj, "pyproject.toml")) || exists(path4.join(proj, "requirements.txt")) || exists(path4.join(proj, "Makefile"));
+  return exists(path6.join(proj, ".git")) || exists(path6.join(proj, "package.json")) || exists(path6.join(proj, "pyproject.toml")) || exists(path6.join(proj, "requirements.txt")) || exists(path6.join(proj, "Makefile"));
 }
 async function stopHook() {
   const input = await readStdin();
@@ -1125,6 +1312,8 @@ async function verifyManual() {
   writeFindingsLog(proj, result);
   const out = [result.summary];
   out.push(`ran: ${result.ranTiers.join(", ") || "(none)"}`);
+  const cov = coverageLine(result.coverage);
+  if (cov) out.push(cov);
   if (result.skipped.length) out.push(`skipped: ${result.skipped.map((s) => `${s.tier} (${s.reason})`).join("; ")}`);
   if (result.fixPrompt) {
     out.push("\n" + result.fixPrompt);

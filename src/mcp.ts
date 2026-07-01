@@ -13,6 +13,7 @@ import { addDismissal } from './core/dismissals';
 import { detect } from './core/detect';
 import { appendText, conventionsPath, readJSON, findingsLogPath, ensureVouchDir, offPath, exists } from './core/memory';
 import { VouchConfig } from './core/types';
+import { coverageLine } from './core/prioritize';
 import * as fs from 'fs';
 
 function proj(): string {
@@ -71,6 +72,8 @@ server.tool(
     if (!cfg) return text('Vouch is not set up for this repo yet. Run /vouch:setup (or call get_setup_suggestion then configure).');
     const result = await runPipeline({ proj: proj(), cfg, intent: loadActiveIntent(proj()), force: !!args.force });
     const out: string[] = [result.summary, `ran: ${result.ranTiers.join(', ') || '(none)'}`];
+    const cov = coverageLine(result.coverage);
+    if (cov) out.push(cov);
     if (result.skipped.length) out.push(`skipped: ${result.skipped.map((s) => `${s.tier} — ${s.reason}`).join('; ')}`);
     if (result.fixPrompt) out.push('\n' + result.fixPrompt);
     else {
