@@ -80,14 +80,14 @@ export function selectTests(opts: {
       reason: `jest --findRelatedTests on ${sources.length} changed file(s)`,
     };
   }
-  // vitest: `related` is a subcommand — only safe to inject when invoked directly.
-  if (effectiveRunner === 'vitest' && !viaScript(testCmd)) {
-    return {
-      command: `vitest related ${fileArgs} --run`,
-      narrowed: true,
-      selectedCount: sources.length,
-      reason: `vitest related on ${sources.length} changed file(s)`,
-    };
+  // vitest: `related` is a subcommand — only safe when invoked directly (a
+  // package script like "npm test" can't take a subcommand). Preserve however
+  // vitest is invoked (e.g. `npx vitest`, `./node_modules/.bin/vitest`).
+  if (effectiveRunner === 'vitest') {
+    if (viaScript(testCmd)) return full('vitest via package script cannot take the `related` subcommand → full suite');
+    const withRelated = testCmd.replace(/\bvitest\b(\s+run)?/, `vitest related ${fileArgs}`);
+    const command = /(^|\s)--run(\s|$)/.test(withRelated) ? withRelated : `${withRelated} --run`;
+    return { command, narrowed: true, selectedCount: sources.length, reason: `vitest related on ${sources.length} changed file(s)` };
   }
   return full('cannot safely narrow this runner invocation → full suite');
 }
