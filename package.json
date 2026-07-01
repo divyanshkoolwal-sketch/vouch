@@ -1,8 +1,31 @@
 {
-  "name": "vouch",
-  "version": "0.2.1",
-  "description": "An automatic trust/verification layer that plugs into the AI coding agent you already use.",
-  "private": true,
+  "name": "@divyanshkoolwal-sketch/vouch",
+  "version": "0.3.0",
+  "description": "An automatic trust/verification layer for AI coding agents — works with Claude Code, OpenAI Codex, and Cursor.",
+  "bin": {
+    "vouch": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "scripts",
+    "skills",
+    "commands",
+    "agents",
+    "hooks",
+    ".claude-plugin",
+    ".mcp.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": "github:divyanshkoolwal-sketch/vouch",
+  "license": "MIT",
+  "keywords": ["verification", "code-review", "ai-agents", "claude-code", "codex", "cursor", "mcp", "hooks"],
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",

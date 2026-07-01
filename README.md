@@ -12,13 +12,23 @@ Vouch is built to be **trusted**: deterministic tool failures are treated as *fa
 
 ---
 
-## Add Vouch to your Claude Code (about 2 minutes)
+## Install
 
-No build step, no API key, no cloud — the plugin ships prebuilt and the reviewer reuses the Claude Code login you already have.
+Vouch works with **Claude Code**, **OpenAI Codex**, and **Cursor** — no API key, no cloud (it ships prebuilt and the reviewer reuses the login you already have in your agent). Requirements: the agent itself, Node 18+, and `git`.
 
-**Before you start**, make sure you have: Claude Code (v2.1 or newer), Node 18+, and `git`. That's it.
+How enforcement differs by host (all get the full MCP tools + intent + automatic verification):
 
-### Step 1 — Add the plugin
+| Host | Automatic verify on finish | Reviewer backend |
+|---|---|---|
+| **Claude Code** | **hard block** → fix → re-verify loop | `claude -p` |
+| **OpenAI Codex** | **hard block** → fix → re-verify loop | `codex exec` |
+| **Cursor** | auto-submits the fix (soft loop); `--strict` adds a hard `git commit` gate | `cursor-agent` |
+
+### Claude Code (~2 minutes)
+
+No build step — the plugin ships prebuilt and reuses your Claude Code login.
+
+#### Step 1 — Add the plugin
 Open Claude Code and type these two commands (one at a time):
 
 ```
@@ -28,10 +38,10 @@ Open Claude Code and type these two commands (one at a time):
 
 The first tells Claude Code where to find Vouch; the second installs it. If it asks for a scope, pick **user** (so it's available in all your projects).
 
-### Step 2 — Restart Claude Code
+#### Step 2 — Restart Claude Code
 Quit and reopen it (or start a new session). Plugins only load at startup, so this step is required. To confirm it worked, type `/plugin` — you should see **vouch** listed as *enabled*.
 
-### Step 3 — Turn it on for a project
+#### Step 3 — Turn it on for a project
 Open a project (any git repo) and run:
 
 ```
@@ -40,7 +50,7 @@ Open a project (any git repo) and run:
 
 Vouch auto-detects how to run your tests/build and asks **one** question to confirm. Done — it's now watching this repo. (It stays asleep in repos where you haven't run setup, so it never gets in your way elsewhere.)
 
-### Step 4 (optional but recommended) — Tell it what you're building
+#### Step 4 (optional but recommended) — Tell it what you're building
 Right before a non-trivial change, run:
 
 ```
@@ -49,7 +59,7 @@ Right before a non-trivial change, run:
 
 …and describe, in plain words, what the change should do. Vouch checks the agent's work against that.
 
-### That's it — now just work normally
+#### Then just work normally
 When the coding agent finishes a change, Vouch automatically runs your project's checks **and** an independent review of the diff. If something's actually broken it stops the agent, hands it one clear fix, and re-checks until it's right. Uncertain stuff is shown as a *question*, never a hard block.
 
 **Handy commands:** `/vouch:verify` (check now) · `/vouch:status` (what's set up + latest findings) · `/vouch:off` (pause/resume).
@@ -59,11 +69,37 @@ When the coding agent finishes a change, Vouch automatically runs your project's
 - *"Vouch is not set up" message?* Run `/vouch:setup` in that repo.
 - *Want to remove it?* `/plugin uninstall vouch@vouch`.
 
+### OpenAI Codex
+
+One command (needs Node 18+), then restart Codex:
+
+```
+npx @divyanshkoolwal-sketch/vouch install codex
+```
+
+This registers Vouch's MCP tools + hooks under `~/.codex` (safe, namespaced merge — your existing config is preserved, with a `.bak` backup). You get the **same hard block → fix → re-verify loop** as Claude Code. Then, in a repo, ask Codex to "set up Vouch for this repo" (it uses the vouch tools to detect your test/build commands) or add a `.vouch/config.json`. Remove any time with `npx @divyanshkoolwal-sketch/vouch uninstall codex`.
+
+### Cursor
+
+One command, then restart Cursor:
+
+```
+npx @divyanshkoolwal-sketch/vouch install cursor            # this project (.cursor/)
+npx @divyanshkoolwal-sketch/vouch install cursor --global   # all projects (~/.cursor)
+npx @divyanshkoolwal-sketch/vouch install cursor --strict   # also hard-block `git commit` until clean
+```
+
+You get Vouch's MCP tools + automatic verification when the agent finishes. Note: Cursor's finish hook is observe-only, so instead of a hard block Vouch **auto-submits the fix as a follow-up** (a soft, bounded loop); add `--strict` to hard-deny `git commit`/`push` while blocking issues remain. Requires the [Cursor CLI](https://cursor.com/docs/cli) for the reviewer (`curl https://cursor.com/install -fsS | bash`). Remove with `npx @divyanshkoolwal-sketch/vouch uninstall cursor`.
+
+Check what's wired up anytime: `npx @divyanshkoolwal-sketch/vouch status`. Add `--dry-run` to any install to preview the exact writes first.
+
 <details><summary>Prefer to run it from source (for hacking on Vouch)?</summary>
 
 ```bash
 git clone https://github.com/divyanshkoolwal-sketch/vouch && cd vouch
-claude --plugin-dir .        # loads it for this session; /reload-plugins to refresh
+npm install && npm run build
+node dist/cli.js install codex    # or: install cursor
+# Claude Code (dev): claude --plugin-dir .   then /reload-plugins
 ```
 </details>
 

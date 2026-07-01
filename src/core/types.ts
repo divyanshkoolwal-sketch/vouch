@@ -99,6 +99,11 @@ export interface VouchConfig {
     /** Optional model id override for the headless reviewer (omit = inherit). */
     model?: string;
     timeoutSec: number;
+    /** Which headless backend runs the review. 'auto' prefers the host agent's
+     *  own CLI (claude/codex/cursor-agent), then falls back. */
+    backend?: 'auto' | 'claude' | 'codex' | 'cursor' | 'api';
+    /** Env var name holding an API key for the 'api' backend (opt-in; never auto-billed). */
+    apiKeyEnv?: string;
   };
   /** Verification intensity. thorough = full map-reduce + N-vote verification
    *  (max accuracy, default); bounded = cap chunks + single refutation;

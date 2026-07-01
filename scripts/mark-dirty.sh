@@ -1,14 +1,12 @@
 #!/bin/bash
-# PostToolUse(Edit|Write|MultiEdit): record — cheaply, with no Node spawn and no
-# external deps — that code changed since the last verification. Never blocks.
-# The actual diff is computed from git at Stop time; here we only set a flag.
+# PostToolUse / afterFileEdit hook (all hosts): record — cheaply, no Node spawn,
+# no deps — that code changed since the last verification. Never blocks.
 set +e
-cat >/dev/null 2>&1   # drain stdin so Claude Code's writer never hits a broken pipe
+cat >/dev/null 2>&1   # drain stdin so the host's writer never hits a broken pipe
 
 [ -n "${VOUCH_DISABLE:-}" ] && exit 0
 
-PROJ="${CLAUDE_PROJECT_DIR:-$PWD}"
-# Only track when Vouch is actually set up for this repo.
+PROJ="${VOUCH_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-${CODEX_PROJECT_DIR:-$PWD}}}"
 [ -f "$PROJ/.vouch/config.json" ] || exit 0
 
 mkdir -p "$PROJ/.vouch/runs" 2>/dev/null

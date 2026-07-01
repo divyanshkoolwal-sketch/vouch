@@ -28,6 +28,7 @@ export function defaultConfig(): VouchConfig {
     reviewer: {
       model: undefined,
       timeoutSec: 90,
+      backend: 'auto',
     },
     // Default to max accuracy (per product decision): full map-reduce + N-vote
     // independent verification. Budget-bounded so a huge repo degrades honestly

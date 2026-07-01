@@ -112,7 +112,8 @@ function defaultConfig() {
     },
     reviewer: {
       model: void 0,
-      timeoutSec: 90
+      timeoutSec: 90,
+      backend: "auto"
     },
     // Default to max accuracy (per product decision): full map-reduce + N-vote
     // independent verification. Budget-bounded so a huge repo degrades honestly
@@ -199,7 +200,7 @@ function dedupe(findings) {
 // src/core/runners.ts
 var TAIL_CHARS = 4e3;
 function runCommand(cmd, cwd, timeoutMs, env = process.env) {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     const start = Date.now();
     let out = "";
     let settled = false;
@@ -208,7 +209,7 @@ function runCommand(cmd, cwd, timeoutMs, env = process.env) {
     try {
       child = (0, import_child_process.spawn)("/bin/sh", ["-c", cmd], { cwd, env });
     } catch (e) {
-      resolve({ code: null, output: "", timedOut: false, spawnError: String(e?.message ?? e), durationMs: 0 });
+      resolve2({ code: null, output: "", timedOut: false, spawnError: String(e?.message ?? e), durationMs: 0 });
       return;
     }
     const cap = (s) => {
@@ -235,7 +236,7 @@ function runCommand(cmd, cwd, timeoutMs, env = process.env) {
       settled = true;
       clearTimeout(timer);
       const tail = out.length > TAIL_CHARS ? out.slice(-TAIL_CHARS) : out;
-      resolve({ code, output: tail.trim(), timedOut, spawnError, durationMs: Date.now() - start });
+      resolve2({ code, output: tail.trim(), timedOut, spawnError, durationMs: Date.now() - start });
     };
     child.on("error", (e) => finish(null, String(e?.message ?? e)));
     child.on("close", (code) => finish(code, null));
@@ -279,43 +280,30 @@ async function runTier(tier, rc, cwd, timeoutMs, blocking) {
 var fs2 = __toESM(require("fs"));
 var path2 = __toESM(require("path"));
 
-// src/core/review/claude.ts
+// src/core/review/backends/spawn.ts
 var import_child_process2 = require("child_process");
-function claudeAvailable() {
+function cliOnPath(bin) {
   try {
-    (0, import_child_process2.execFileSync)("claude", ["--version"], { stdio: "ignore" });
+    (0, import_child_process2.execFileSync)(bin, ["--version"], { stdio: "ignore" });
     return true;
   } catch {
     return false;
   }
 }
-function runClaude(opts) {
-  const allowed = opts.allowedTools ?? ["Read", "Grep", "Glob"];
-  const args = [
-    "-p",
-    opts.userPrompt,
-    "--output-format",
-    "json",
-    "--allowedTools",
-    ...allowed,
-    "--append-system-prompt",
-    opts.systemPrompt,
-    "--max-turns",
-    String(opts.maxTurns ?? 8)
-  ];
-  if (opts.model) args.push("--model", opts.model);
-  return new Promise((resolve) => {
+function runCLI(bin, args, cwd, timeoutSec) {
+  return new Promise((resolve2) => {
     let stdout = "";
     let settled = false;
+    let timedOut = false;
     const done = (v) => {
       if (settled) return;
       settled = true;
-      resolve(v);
+      resolve2(v);
     };
     let child;
     try {
-      child = (0, import_child_process2.spawn)("claude", args, {
-        cwd: opts.cwd,
+      child = (0, import_child_process2.spawn)(bin, args, {
+        cwd,
         env: { ...process.env, VOUCH_DISABLE: "1" },
         stdio: ["ignore", "pipe", "ignore"]
       });
@@ -324,6 +312,7 @@ function runClaude(opts) {
       return;
     }
     const timer = setTimeout(() => {
+      timedOut = true;
       try {
         child.kill("SIGTERM");
         setTimeout(() => {
@@ -334,24 +323,146 @@ function runClaude(opts) {
         }, 2e3);
       } catch {
       }
-      done(null);
-    }, opts.timeoutSec * 1e3);
+    }, timeoutSec * 1e3);
     child.stdout?.on("data", (d) => stdout += d.toString());
     child.on("error", () => {
       clearTimeout(timer);
       done(null);
     });
-    child.on("close", () => {
+    child.on("close", (code) => {
       clearTimeout(timer);
-      try {
-        const env = JSON.parse(stdout);
-        if (typeof env?.result === "string") return done({ text: env.result, isError: !!env.is_error });
-      } catch {
-      }
-      done(null);
+      if (timedOut) return done(null);
+      done({ stdout, code, timedOut });
     });
   });
 }
+
+// src/core/review/backends/claude.ts
+var claudeBackend = {
+  name: "claude",
+  available: () => cliOnPath("claude"),
+  async run(req) {
+    const allowed = req.allowedTools ?? ["Read", "Grep", "Glob"];
+    const args = [
+      "-p",
+      req.userPrompt,
+      "--output-format",
+      "json",
+      "--allowedTools",
+      ...allowed,
+      "--append-system-prompt",
+      req.systemPrompt,
+      "--max-turns",
+      String(req.maxTurns ?? 8)
+    ];
+    if (req.model) args.push("--model", req.model);
+    const res = await runCLI("claude", args, req.cwd, req.timeoutSec);
+    if (!res) return null;
+    try {
+      const env = JSON.parse(res.stdout);
+      if (typeof env?.result === "string") return { text: env.result, isError: !!env.is_error };
+    } catch {
+    }
+    return null;
+  }
+};
+
+// src/core/review/backends/codex.ts
+var codexBackend = {
+  name: "codex",
+  available: () => cliOnPath("codex"),
+  async run(req) {
+    const prompt = `${req.systemPrompt}
+
+${req.userPrompt}`;
+    const args = ["exec", "--sandbox", "read-only", "--ask-for-approval", "never", "--skip-git-repo-check", prompt];
+    const res = await runCLI("codex", args, req.cwd, req.timeoutSec);
+    if (!res) return null;
+    return { text: res.stdout, isError: res.code !== 0 };
+  }
+};
+
+// src/core/review/backends/cursor.ts
+var cursorBackend = {
+  name: "cursor",
+  available: () => cliOnPath("cursor-agent"),
+  async run(req) {
+    const prompt = `${req.systemPrompt}
+
+${req.userPrompt}`;
+    const args = ["-p", prompt, "--output-format", "json", "--trust"];
+    const res = await runCLI("cursor-agent", args, req.cwd, req.timeoutSec);
+    if (!res) return null;
+    try {
+      const env = JSON.parse(res.stdout);
+      if (typeof env?.result === "string") return { text: env.result, isError: !!env.is_error };
+    } catch {
+    }
+    return null;
+  }
+};
+
+// src/core/review/backends/api.ts
+function provider(apiKeyEnv) {
+  return /openai/i.test(apiKeyEnv) ? "openai" : "anthropic";
+}
+var apiBackend = {
+  name: "api",
+  available(cfg) {
+    const env = cfg.reviewer.apiKeyEnv;
+    return !!(env && process.env[env]);
+  },
+  async run(req, cfg) {
+    const envName = cfg.reviewer.apiKeyEnv;
+    if (!envName) return null;
+    const key = process.env[envName];
+    if (!key) return null;
+    const kind = provider(envName);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), req.timeoutSec * 1e3);
+    try {
+      if (kind === "anthropic") {
+        const r2 = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+          body: JSON.stringify({
+            model: req.model || "claude-haiku-4-5",
+            max_tokens: 2048,
+            system: req.systemPrompt,
+            messages: [{ role: "user", content: req.userPrompt }]
+          }),
+          signal: controller.signal
+        });
+        if (!r2.ok) return null;
+        const j2 = await r2.json();
+        const text2 = j2?.content?.map((c) => c.text).filter(Boolean).join("\n") ?? "";
+        return { text: text2, isError: false };
+      }
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model: req.model || "gpt-5",
+          messages: [
+            { role: "system", content: req.systemPrompt },
+            { role: "user", content: req.userPrompt }
+          ]
+        }),
+        signal: controller.signal
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const text = j?.choices?.[0]?.message?.content ?? "";
+      return { text, isError: false };
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+};
+
+// src/core/review/backends/json.ts
 function extractJSON(text) {
   let t = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   const firstObj = t.indexOf("{");
@@ -368,6 +479,51 @@ function extractJSON(text) {
   } catch {
     return null;
   }
+}
+
+// src/core/review/backends/index.ts
+var BACKENDS = {
+  claude: claudeBackend,
+  codex: codexBackend,
+  cursor: cursorBackend,
+  api: apiBackend
+};
+var AUTO_ORDER = ["claude", "codex", "cursor"];
+var resolveCache = /* @__PURE__ */ new Map();
+function cacheKey(cfg) {
+  return `${cfg.reviewer.backend ?? "auto"}|${process.env.VOUCH_HOST ?? ""}|${cfg.reviewer.apiKeyEnv ?? ""}`;
+}
+function resolveBackend(cfg, backends = BACKENDS) {
+  const key = cacheKey(cfg);
+  if (resolveCache.has(key)) return resolveCache.get(key);
+  let chosen = null;
+  const explicit = cfg.reviewer.backend;
+  if (explicit && explicit !== "auto") {
+    const b = backends[explicit];
+    chosen = b && b.available(cfg) ? b : null;
+  } else {
+    const order = [];
+    const host = process.env.VOUCH_HOST;
+    if (host && backends[host]) order.push(host);
+    for (const n of AUTO_ORDER) if (!order.includes(n)) order.push(n);
+    for (const n of order) {
+      if (backends[n].available(cfg)) {
+        chosen = backends[n];
+        break;
+      }
+    }
+    if (!chosen && backends.api.available(cfg)) chosen = backends.api;
+  }
+  resolveCache.set(key, chosen);
+  return chosen;
+}
+function backendAvailable(cfg, backends) {
+  return resolveBackend(cfg, backends) != null;
+}
+async function runReviewer(req, cfg) {
+  const backend = resolveBackend(cfg);
+  if (!backend) return null;
+  return backend.run(req, cfg);
 }
 
 // src/core/review/map.ts
@@ -442,14 +598,17 @@ function mapChunkFindings(raw, cfg) {
   return out;
 }
 async function reviewChunk(opts) {
-  const res = await runClaude({
-    cwd: opts.proj,
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: buildUserPrompt(opts.intent, opts.chunk),
-    model: opts.cfg.reviewer.model,
-    timeoutSec: opts.cfg.reviewer.timeoutSec,
-    maxTurns: 8
-  });
+  const res = await runReviewer(
+    {
+      cwd: opts.proj,
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: buildUserPrompt(opts.intent, opts.chunk),
+      model: opts.cfg.reviewer.model,
+      timeoutSec: opts.cfg.reviewer.timeoutSec,
+      maxTurns: 8
+    },
+    opts.cfg
+  );
   if (!res || res.isError) return [];
   const parsed = extractJSON(res.text);
   if (!parsed) return [];
@@ -554,14 +713,17 @@ ${finding.evidence}
   ].filter(Boolean).join("\n");
 }
 async function askOne(proj, finding, intent, cfg) {
-  const res = await runClaude({
-    cwd: proj,
-    systemPrompt: VERIFIER_SYSTEM,
-    userPrompt: buildVerifierPrompt(finding, intent),
-    model: cfg.reviewer.model,
-    timeoutSec: cfg.reviewer.timeoutSec,
-    maxTurns: 6
-  });
+  const res = await runReviewer(
+    {
+      cwd: proj,
+      systemPrompt: VERIFIER_SYSTEM,
+      userPrompt: buildVerifierPrompt(finding, intent),
+      model: cfg.reviewer.model,
+      timeoutSec: cfg.reviewer.timeoutSec,
+      maxTurns: 6
+    },
+    cfg
+  );
   if (!res || res.isError) return null;
   const parsed = extractJSON(res.text);
   if (!parsed || typeof parsed.real !== "boolean") return null;
@@ -597,8 +759,8 @@ async function verifyFindings(findings, opts) {
 }
 
 // src/core/reviewer.ts
-function reviewerAvailable() {
-  return claudeAvailable();
+function reviewerAvailable(cfg) {
+  return backendAvailable(cfg);
 }
 function fileReader(proj) {
   return (rel) => {
@@ -1107,8 +1269,8 @@ async function runPipeline(opts) {
     skipped.push({ tier: "intent", reason: "no active intent captured (run /vouch:intent)" });
   } else if (!diff.isGit) {
     skipped.push({ tier: "intent", reason: "not a git repo \u2014 cannot scope a diff to review" });
-  } else if (!deps.reviewerAvailable()) {
-    skipped.push({ tier: "intent", reason: "`claude` CLI not available for the independent reviewer" });
+  } else if (!deps.reviewerAvailable(cfg)) {
+    skipped.push({ tier: "intent", reason: "no reviewer backend available (claude/codex/cursor CLI or API key)" });
   } else if (overBudget()) {
     budgetHit = true;
     skipped.push({ tier: "intent", reason: `time budget (${cfg.budgetSec}s) reached before intent review` });
@@ -1182,22 +1344,267 @@ function markDirty(proj) {
 }
 
 // src/cli.ts
+var path7 = __toESM(require("path"));
+
+// src/core/hostOutput.ts
+function claudeStopOutput(d) {
+  if (d.kind === "allow-silent") return null;
+  if (d.kind === "block") return { decision: "block", reason: d.fixPrompt, systemMessage: d.systemMessage };
+  return { systemMessage: d.systemMessage };
+}
+function cursorStopOutput(d) {
+  return d.kind === "block" ? { followup_message: d.fixPrompt } : null;
+}
+function isGitCommitOrPush(cmd) {
+  return /\bgit\b[^\n]*\b(commit|push)\b/.test(cmd);
+}
+function cursorGuardOutput(cmd, blocking, questions = [], notices = []) {
+  if (!isGitCommitOrPush(cmd) || blocking.length === 0) return null;
+  const fixPrompt = buildFixPrompt(blocking, questions, void 0, notices);
+  return {
+    permission: "deny",
+    agent_message: `Vouch: ${blocking.length} unresolved blocking issue(s) \u2014 fix and re-verify before committing.
+
+${fixPrompt}`
+  };
+}
+
+// src/install.ts
+var fs7 = __toESM(require("fs"));
+var os = __toESM(require("os"));
 var path6 = __toESM(require("path"));
+var PKG_ROOT = path6.resolve(__dirname, "..");
+var DIST = path6.join(PKG_ROOT, "dist");
+var SCRIPTS = path6.join(PKG_ROOT, "scripts");
+var SKILL_SRC = path6.join(PKG_ROOT, "skills", "understand-intent", "SKILL.md");
+function q(s) {
+  return `"${s}"`;
+}
+function readFileOr(file, fallback = "") {
+  try {
+    return fs7.readFileSync(file, "utf8");
+  } catch {
+    return fallback;
+  }
+}
+function writeTarget(file, content, dry, actions) {
+  const exists2 = fs7.existsSync(file);
+  if (exists2 && fs7.readFileSync(file, "utf8") === content) {
+    actions.push({ kind: "skip", target: file, detail: "already up to date" });
+    return;
+  }
+  if (dry) {
+    actions.push({ kind: "write", target: file, detail: exists2 ? "would update" : "would create" });
+    return;
+  }
+  fs7.mkdirSync(path6.dirname(file), { recursive: true });
+  if (exists2) {
+    fs7.copyFileSync(file, file + ".bak");
+    actions.push({ kind: "backup", target: file + ".bak" });
+  }
+  fs7.writeFileSync(file, content);
+  actions.push({ kind: "write", target: file, detail: exists2 ? "updated" : "created" });
+}
+function readJSONObj(file) {
+  try {
+    return JSON.parse(fs7.readFileSync(file, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function mergeHookEvent(hooksObj, event, entries) {
+  hooksObj.hooks = hooksObj.hooks ?? {};
+  const existing = Array.isArray(hooksObj.hooks[event]) ? hooksObj.hooks[event] : [];
+  const others = existing.filter((e) => !e || !e._vouch);
+  hooksObj.hooks[event] = [...others, ...entries.map((e) => ({ ...e, _vouch: true }))];
+}
+function removeVouchHooks(hooksObj) {
+  if (!hooksObj?.hooks) return;
+  for (const ev of Object.keys(hooksObj.hooks)) {
+    if (Array.isArray(hooksObj.hooks[ev])) {
+      hooksObj.hooks[ev] = hooksObj.hooks[ev].filter((e) => !e || !e._vouch);
+      if (hooksObj.hooks[ev].length === 0) delete hooksObj.hooks[ev];
+    }
+  }
+}
+var TOML_HEADER = "[mcp_servers.vouch]";
+function upsertTomlSection(content, body) {
+  const stripped = removeTomlSection(content);
+  const sep = stripped && !stripped.endsWith("\n") ? "\n" : "";
+  const lead = stripped.trim() ? "\n" : "";
+  return `${stripped}${sep}${lead}${TOML_HEADER}
+${body}`.replace(/\n{3,}/g, "\n\n");
+}
+function removeTomlSection(content) {
+  const lines = content.split("\n");
+  const out = [];
+  let skipping = false;
+  for (const line of lines) {
+    if (line.trim() === TOML_HEADER) {
+      skipping = true;
+      continue;
+    }
+    if (skipping) {
+      if (/^\s*\[/.test(line)) skipping = false;
+      else continue;
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+function mcpServerJSON(host) {
+  return { command: "node", args: [path6.join(DIST, "mcp.js")], env: { VOUCH_HOST: host } };
+}
+function codexDir() {
+  return path6.join(os.homedir(), ".codex");
+}
+function installCodex(opts, actions) {
+  const dir = codexDir();
+  const cfgToml = path6.join(dir, "config.toml");
+  const body = ['command = "node"', `args = [${q(path6.join(DIST, "mcp.js"))}]`, 'env = { VOUCH_HOST = "codex" }', ""].join("\n");
+  writeTarget(cfgToml, upsertTomlSection(readFileOr(cfgToml), body), !!opts.dryRun, actions);
+  const hooksFile = path6.join(dir, "hooks.json");
+  const hooksObj = readJSONObj(hooksFile);
+  const cmd = (script) => `VOUCH_HOST=codex bash ${q(path6.join(SCRIPTS, script))}`;
+  mergeHookEvent(hooksObj, "SessionStart", [{ hooks: [{ type: "command", command: cmd("session-start.sh"), timeout: 10 }] }]);
+  mergeHookEvent(hooksObj, "PostToolUse", [{ hooks: [{ type: "command", command: cmd("mark-dirty.sh"), timeout: 5 }] }]);
+  mergeHookEvent(hooksObj, "Stop", [{ hooks: [{ type: "command", command: cmd("verify-stop.sh"), timeout: 240 }] }]);
+  writeTarget(hooksFile, JSON.stringify(hooksObj, null, 2) + "\n", !!opts.dryRun, actions);
+  writeTarget(path6.join(dir, "skills", "understand-intent", "SKILL.md"), readFileOr(SKILL_SRC), !!opts.dryRun, actions);
+  actions.push({ kind: "note", target: "codex", detail: "MCP tools + hard-block verify loop + intent skill installed (global ~/.codex)." });
+}
+function uninstallCodex(opts, actions) {
+  const dir = codexDir();
+  const cfgToml = path6.join(dir, "config.toml");
+  if (fs7.existsSync(cfgToml)) writeTarget(cfgToml, removeTomlSection(readFileOr(cfgToml)).replace(/\n+$/, "\n"), !!opts.dryRun, actions);
+  const hooksFile = path6.join(dir, "hooks.json");
+  if (fs7.existsSync(hooksFile)) {
+    const obj = readJSONObj(hooksFile);
+    removeVouchHooks(obj);
+    writeTarget(hooksFile, JSON.stringify(obj, null, 2) + "\n", !!opts.dryRun, actions);
+  }
+  const skill = path6.join(dir, "skills", "understand-intent", "SKILL.md");
+  if (fs7.existsSync(skill) && !opts.dryRun) {
+    fs7.rmSync(skill, { force: true });
+  }
+  actions.push({ kind: "note", target: "codex", detail: "Removed vouch MCP block, hooks, and skill." });
+}
+function cursorRoot(opts) {
+  return opts.global ? path6.join(os.homedir(), ".cursor") : path6.join(opts.projectDir ?? process.cwd(), ".cursor");
+}
+function installCursor(opts, actions) {
+  const root = cursorRoot(opts);
+  const mcpFile = path6.join(root, "mcp.json");
+  const mcpObj = readJSONObj(mcpFile);
+  mcpObj.mcpServers = mcpObj.mcpServers ?? {};
+  mcpObj.mcpServers.vouch = mcpServerJSON("cursor");
+  writeTarget(mcpFile, JSON.stringify(mcpObj, null, 2) + "\n", !!opts.dryRun, actions);
+  const hooksFile = path6.join(root, "hooks.json");
+  const hooksObj = readJSONObj(hooksFile);
+  hooksObj.version = hooksObj.version ?? 1;
+  const nodeCmd = (subcmd) => `VOUCH_HOST=cursor node ${q(path6.join(DIST, "cli.js"))} ${subcmd}`;
+  mergeHookEvent(hooksObj, "afterFileEdit", [{ command: `VOUCH_HOST=cursor bash ${q(path6.join(SCRIPTS, "mark-dirty.sh"))}` }]);
+  mergeHookEvent(hooksObj, "stop", [{ command: nodeCmd("cursor-stop") }]);
+  if (opts.strict) {
+    mergeHookEvent(hooksObj, "beforeShellExecution", [{ command: nodeCmd("cursor-guard"), failClosed: true }]);
+  } else {
+    if (hooksObj.hooks?.beforeShellExecution) {
+      hooksObj.hooks.beforeShellExecution = hooksObj.hooks.beforeShellExecution.filter((e) => !e?._vouch);
+      if (hooksObj.hooks.beforeShellExecution.length === 0) delete hooksObj.hooks.beforeShellExecution;
+    }
+  }
+  writeTarget(hooksFile, JSON.stringify(hooksObj, null, 2) + "\n", !!opts.dryRun, actions);
+  const rule = [
+    "---",
+    "description: Confirm intent, then let Vouch verify changes before finishing",
+    "alwaysApply: false",
+    "---",
+    "",
+    "- For a non-trivial change, first call the `record_intent` tool (vouch MCP) with a short summary + a few acceptance criteria.",
+    "- When you finish, Vouch verifies automatically; if it returns blocking issues, fix them and re-verify.",
+    "- To check on demand, call the `verify` tool. Dismiss a genuine non-issue with `dismiss_finding`.",
+    ""
+  ].join("\n");
+  writeTarget(path6.join(root, "rules", "vouch.mdc"), rule, !!opts.dryRun, actions);
+  actions.push({
+    kind: "note",
+    target: "cursor",
+    detail: `MCP tools + soft verify loop${opts.strict ? " + commit gate" : ""} + intent rule installed (${opts.global ? "global ~/.cursor" : root}).`
+  });
+}
+function uninstallCursor(opts, actions) {
+  const root = cursorRoot(opts);
+  const mcpFile = path6.join(root, "mcp.json");
+  if (fs7.existsSync(mcpFile)) {
+    const obj = readJSONObj(mcpFile);
+    if (obj.mcpServers) delete obj.mcpServers.vouch;
+    writeTarget(mcpFile, JSON.stringify(obj, null, 2) + "\n", !!opts.dryRun, actions);
+  }
+  const hooksFile = path6.join(root, "hooks.json");
+  if (fs7.existsSync(hooksFile)) {
+    const obj = readJSONObj(hooksFile);
+    removeVouchHooks(obj);
+    writeTarget(hooksFile, JSON.stringify(obj, null, 2) + "\n", !!opts.dryRun, actions);
+  }
+  const rule = path6.join(root, "rules", "vouch.mdc");
+  if (fs7.existsSync(rule) && !opts.dryRun) fs7.rmSync(rule, { force: true });
+  actions.push({ kind: "note", target: "cursor", detail: "Removed vouch MCP server, hooks, and rule." });
+}
+function runInstall(tool, opts) {
+  const actions = [];
+  if (tool === "codex") installCodex(opts, actions);
+  else if (tool === "cursor") installCursor(opts, actions);
+  else actions.push({ kind: "note", target: tool, detail: `Unknown tool "${tool}". Use: codex | cursor. (Claude Code uses the plugin install \u2014 see README.)` });
+  return actions;
+}
+function runUninstall(tool, opts) {
+  const actions = [];
+  if (tool === "codex") uninstallCodex(opts, actions);
+  else if (tool === "cursor") uninstallCursor(opts, actions);
+  else actions.push({ kind: "note", target: tool, detail: `Unknown tool "${tool}". Use: codex | cursor.` });
+  return actions;
+}
+function statusLines(opts) {
+  const out = [];
+  const codexToml = path6.join(codexDir(), "config.toml");
+  out.push(`codex:  MCP ${readFileOr(codexToml).includes(TOML_HEADER) ? "\u2713" : "\u2014"}  hooks ${readFileOr(path6.join(codexDir(), "hooks.json")).includes("_vouch") ? "\u2713" : "\u2014"}  (~/.codex)`);
+  const croot = cursorRoot(opts);
+  out.push(`cursor: MCP ${readFileOr(path6.join(croot, "mcp.json")).includes('"vouch"') ? "\u2713" : "\u2014"}  hooks ${readFileOr(path6.join(croot, "hooks.json")).includes("_vouch") ? "\u2713" : "\u2014"}  (${opts.global ? "~/.cursor" : croot})`);
+  return out;
+}
+function formatActions(actions, dryRun) {
+  const lines = actions.map((a) => {
+    if (a.kind === "note") return `  \u2022 ${a.detail}`;
+    if (a.kind === "backup") return `  \u21B3 backup: ${a.target}`;
+    if (a.kind === "skip") return `  = ${a.target} (${a.detail})`;
+    return `  ${dryRun ? "\xB7" : "\u2713"} ${a.target}${a.detail ? ` (${a.detail})` : ""}`;
+  });
+  return lines.join("\n");
+}
+
+// src/cli.ts
+function parseStdin(input) {
+  try {
+    return JSON.parse(input);
+  } catch {
+    return {};
+  }
+}
 function resolveProj(stdinObj) {
   return process.env.VOUCH_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR || (stdinObj && typeof stdinObj.cwd === "string" ? stdinObj.cwd : "") || process.cwd();
 }
 function readStdin() {
-  return new Promise((resolve) => {
+  return new Promise((resolve2) => {
     let data = "";
     if (process.stdin.isTTY) {
-      resolve("");
+      resolve2("");
       return;
     }
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (c) => data += c);
-    process.stdin.on("end", () => resolve(data));
-    process.stdin.on("error", () => resolve(data));
-    setTimeout(() => resolve(data), 2e3);
+    process.stdin.on("end", () => resolve2(data));
+    process.stdin.on("error", () => resolve2(data));
+    setTimeout(() => resolve2(data), 2e3);
   });
 }
 function printHookJSON(obj) {
@@ -1218,38 +1625,32 @@ function writeFindingsLog(proj, result) {
   }
 }
 function looksLikeProject(proj) {
-  return exists(path6.join(proj, ".git")) || exists(path6.join(proj, "package.json")) || exists(path6.join(proj, "pyproject.toml")) || exists(path6.join(proj, "requirements.txt")) || exists(path6.join(proj, "Makefile"));
+  return exists(path7.join(proj, ".git")) || exists(path7.join(proj, "package.json")) || exists(path7.join(proj, "pyproject.toml")) || exists(path7.join(proj, "requirements.txt")) || exists(path7.join(proj, "Makefile"));
 }
-async function stopHook() {
-  const input = await readStdin();
-  let hook = {};
-  try {
-    hook = JSON.parse(input);
-  } catch {
-  }
+async function computeStopDecision(hook) {
   const proj = resolveProj(hook);
   const cfg = loadConfig(proj);
-  if (!cfg) return;
-  if (exists(offPath(proj))) return;
+  if (!cfg) return { kind: "allow-silent" };
+  if (exists(offPath(proj))) return { kind: "allow-silent" };
   const state = loadState(proj);
   const diff = workingDiff(proj);
   const dirty = isDirty(proj);
   if (!diff.patch) {
     clearDirty(proj);
     saveState(proj, { lastDiffHash: diff.hash || null, iteration: 0 });
-    return;
+    return { kind: "allow-silent" };
   }
-  if (!dirty && diff.hash === state.lastDiffHash) return;
+  if (!dirty && diff.hash === state.lastDiffHash) return { kind: "allow-silent" };
   const stopActive = !!hook.stop_hook_active;
   if (cfg.enforcement.block && stopActive && state.iteration >= cfg.enforcement.maxIterations) {
     const result2 = await runPipeline({ proj, cfg, intent: loadActiveIntent(proj) });
     writeFindingsLog(proj, result2);
     clearDirty(proj);
     saveState(proj, { lastDiffHash: diff.hash || null, iteration: 0 });
-    printHookJSON({
+    return {
+      kind: "allow",
       systemMessage: `Vouch: released after ${cfg.enforcement.maxIterations} fix rounds \u2014 ${result2.blocking.length} issue(s) still unresolved. Run /vouch:status for details.`
-    });
-    return;
+    };
   }
   const round = state.iteration + 1;
   const result = await runPipeline({
@@ -1261,16 +1662,32 @@ async function stopHook() {
   writeFindingsLog(proj, result);
   if (cfg.enforcement.block && result.blocking.length) {
     saveState(proj, { lastDiffHash: state.lastDiffHash, iteration: round });
-    printHookJSON({
-      decision: "block",
-      reason: result.fixPrompt,
+    return {
+      kind: "block",
+      fixPrompt: result.fixPrompt,
       systemMessage: `${result.summary} \u2014 blocking (round ${round}/${cfg.enforcement.maxIterations})`
-    });
-    return;
+    };
   }
   clearDirty(proj);
   saveState(proj, { lastDiffHash: diff.hash || null, iteration: 0 });
-  printHookJSON({ systemMessage: result.summary });
+  return { kind: "allow", systemMessage: result.summary };
+}
+async function stopHook() {
+  const out = claudeStopOutput(await computeStopDecision(parseStdin(await readStdin())));
+  if (out) printHookJSON(out);
+}
+async function cursorStop() {
+  const out = cursorStopOutput(await computeStopDecision(parseStdin(await readStdin())));
+  if (out) printHookJSON(out);
+}
+async function cursorGuard() {
+  const hook = parseStdin(await readStdin());
+  const proj = resolveProj(hook);
+  const cfg = loadConfig(proj);
+  if (!cfg || exists(offPath(proj))) return;
+  const last = readJSON(findingsLogPath(proj), null);
+  const out = cursorGuardOutput(String(hook.command ?? ""), last?.blocking ?? [], last?.questions ?? [], last?.notices ?? []);
+  if (out) printHookJSON(out);
 }
 function sessionContext() {
   const proj = resolveProj();
@@ -1324,20 +1741,56 @@ async function verifyManual() {
     }
     if (result.questions.length) {
       out.push("\nOpen questions:");
-      result.questions.forEach((q) => out.push(`- [${q.tier}] ${q.title} (id: ${q.id})`));
+      result.questions.forEach((q2) => out.push(`- [${q2.tier}] ${q2.title} (id: ${q2.id})`));
     }
   }
   process.stdout.write(out.join("\n") + "\n");
 }
+var HOOK_SUBS = /* @__PURE__ */ new Set(["stop-hook", "cursor-stop", "cursor-guard", "session-context", "mark-dirty"]);
+function parseInstallOpts(args) {
+  const tool = args.find((a) => !a.startsWith("-")) ?? "";
+  return {
+    tool,
+    opts: { global: args.includes("--global"), strict: args.includes("--strict"), dryRun: args.includes("--dry-run") }
+  };
+}
+var HELP = `vouch \u2014 automatic verification for AI coding agents
+
+Install into a host agent (Claude Code uses its plugin \u2014 see README):
+  vouch install codex               wire up OpenAI Codex (global ~/.codex)
+  vouch install cursor [--global]   wire up Cursor (project .cursor/ by default)
+  vouch install cursor --strict     also add the hard commit-gate
+  vouch uninstall <codex|cursor>    remove Vouch's config (keeps your other settings)
+  vouch status                      show what's wired up
+  add --dry-run to preview writes without changing anything
+
+Other:
+  vouch verify                      run verification now in the current repo
+`;
 async function main() {
   const sub = process.argv[2];
+  if (process.env.VOUCH_DISABLE && sub && HOOK_SUBS.has(sub)) process.exit(0);
   try {
     if (sub === "stop-hook") await stopHook();
+    else if (sub === "cursor-stop") await cursorStop();
+    else if (sub === "cursor-guard") await cursorGuard();
     else if (sub === "session-context") sessionContext();
     else if (sub === "verify") await verifyManual();
     else if (sub === "mark-dirty") markDirty(resolveProj());
-    else process.stdout.write(`vouch cli: unknown subcommand "${sub ?? ""}"
+    else if (sub === "install" || sub === "uninstall") {
+      const { tool, opts } = parseInstallOpts(process.argv.slice(3));
+      const actions = sub === "install" ? runInstall(tool, opts) : runUninstall(tool, opts);
+      process.stdout.write(`vouch ${sub} ${tool}${opts.dryRun ? " (dry-run)" : ""}:
+${formatActions(actions, !!opts.dryRun)}
 `);
+    } else if (sub === "status") {
+      const { opts } = parseInstallOpts(process.argv.slice(3));
+      process.stdout.write("Vouch host integrations:\n" + statusLines(opts).map((l) => "  " + l).join("\n") + "\n");
+    } else if (!sub || sub === "help" || sub === "--help" || sub === "-h") {
+      process.stdout.write(HELP);
+    } else process.stdout.write(`vouch: unknown command "${sub}"
+
+${HELP}`);
   } catch {
   }
   process.exit(0);

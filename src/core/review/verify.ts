@@ -6,7 +6,7 @@
 // and independence is essential (a verifier that just re-reads the draft
 // re-confirms the hallucination).
 import { Finding, IntentRecord, VouchConfig } from '../types';
-import { runClaude, extractJSON } from './claude';
+import { runReviewer, extractJSON } from './backends';
 import { mapLimit } from './concurrency';
 
 const VERIFIER_SYSTEM = [
@@ -31,14 +31,17 @@ function buildVerifierPrompt(finding: Finding, intent: IntentRecord): string {
 }
 
 async function askOne(proj: string, finding: Finding, intent: IntentRecord, cfg: VouchConfig): Promise<boolean | null> {
-  const res = await runClaude({
-    cwd: proj,
-    systemPrompt: VERIFIER_SYSTEM,
-    userPrompt: buildVerifierPrompt(finding, intent),
-    model: cfg.reviewer.model,
-    timeoutSec: cfg.reviewer.timeoutSec,
-    maxTurns: 6,
-  });
+  const res = await runReviewer(
+    {
+      cwd: proj,
+      systemPrompt: VERIFIER_SYSTEM,
+      userPrompt: buildVerifierPrompt(finding, intent),
+      model: cfg.reviewer.model,
+      timeoutSec: cfg.reviewer.timeoutSec,
+      maxTurns: 6,
+    },
+    cfg,
+  );
   if (!res || res.isError) return null;
   const parsed = extractJSON(res.text);
   if (!parsed || typeof parsed.real !== 'boolean') return null;

@@ -4235,8 +4235,8 @@ var require_core = __commonJS({
             return this;
           }
           case "object": {
-            const cacheKey = schemaKeyRef;
-            this._cache.delete(cacheKey);
+            const cacheKey2 = schemaKeyRef;
+            this._cache.delete(cacheKey2);
             let id = schemaKeyRef[this.opts.schemaId];
             if (id) {
               id = (0, resolve_1.normalizeId)(id);
@@ -21187,7 +21187,8 @@ function defaultConfig() {
     },
     reviewer: {
       model: void 0,
-      timeoutSec: 90
+      timeoutSec: 90,
+      backend: "auto"
     },
     // Default to max accuracy (per product decision): full map-reduce + N-vote
     // independent verification. Budget-bounded so a huge repo degrades honestly
@@ -21394,34 +21395,21 @@ async function runTier(tier, rc, cwd, timeoutMs, blocking) {
 var fs3 = __toESM(require("fs"));
 var path3 = __toESM(require("path"));
 
-// src/core/review/claude.ts
+// src/core/review/backends/spawn.ts
 var import_child_process2 = require("child_process");
-function claudeAvailable() {
+function cliOnPath(bin) {
   try {
-    (0, import_child_process2.execFileSync)("claude", ["--version"], { stdio: "ignore" });
+    (0, import_child_process2.execFileSync)(bin, ["--version"], { stdio: "ignore" });
     return true;
   } catch {
     return false;
   }
 }
-function runClaude(opts) {
-  const allowed = opts.allowedTools ?? ["Read", "Grep", "Glob"];
-  const args = [
-    "-p",
-    opts.userPrompt,
-    "--output-format",
-    "json",
-    "--allowedTools",
-    ...allowed,
-    "--append-system-prompt",
-    opts.systemPrompt,
-    "--max-turns",
-    String(opts.maxTurns ?? 8)
-  ];
-  if (opts.model) args.push("--model", opts.model);
+function runCLI(bin, args, cwd, timeoutSec) {
   return new Promise((resolve) => {
     let stdout = "";
     let settled = false;
+    let timedOut = false;
     const done = (v) => {
       if (settled) return;
       settled = true;
@@ -21429,8 +21417,8 @@ function runClaude(opts) {
     };
     let child;
     try {
-      child = (0, import_child_process2.spawn)("claude", args, {
-        cwd: opts.cwd,
+      child = (0, import_child_process2.spawn)(bin, args, {
+        cwd,
         env: { ...process.env, VOUCH_DISABLE: "1" },
         stdio: ["ignore", "pipe", "ignore"]
       });
@@ -21439,6 +21427,7 @@ function runClaude(opts) {
       return;
     }
     const timer = setTimeout(() => {
+      timedOut = true;
       try {
         child.kill("SIGTERM");
         setTimeout(() => {
@@ -21449,24 +21438,146 @@ function runClaude(opts) {
         }, 2e3);
       } catch {
       }
-      done(null);
-    }, opts.timeoutSec * 1e3);
+    }, timeoutSec * 1e3);
     child.stdout?.on("data", (d) => stdout += d.toString());
     child.on("error", () => {
       clearTimeout(timer);
       done(null);
     });
-    child.on("close", () => {
+    child.on("close", (code) => {
       clearTimeout(timer);
-      try {
-        const env = JSON.parse(stdout);
-        if (typeof env?.result === "string") return done({ text: env.result, isError: !!env.is_error });
-      } catch {
-      }
-      done(null);
+      if (timedOut) return done(null);
+      done({ stdout, code, timedOut });
     });
   });
 }
+
+// src/core/review/backends/claude.ts
+var claudeBackend = {
+  name: "claude",
+  available: () => cliOnPath("claude"),
+  async run(req) {
+    const allowed = req.allowedTools ?? ["Read", "Grep", "Glob"];
+    const args = [
+      "-p",
+      req.userPrompt,
+      "--output-format",
+      "json",
+      "--allowedTools",
+      ...allowed,
+      "--append-system-prompt",
+      req.systemPrompt,
+      "--max-turns",
+      String(req.maxTurns ?? 8)
+    ];
+    if (req.model) args.push("--model", req.model);
+    const res = await runCLI("claude", args, req.cwd, req.timeoutSec);
+    if (!res) return null;
+    try {
+      const env = JSON.parse(res.stdout);
+      if (typeof env?.result === "string") return { text: env.result, isError: !!env.is_error };
+    } catch {
+    }
+    return null;
+  }
+};
+
+// src/core/review/backends/codex.ts
+var codexBackend = {
+  name: "codex",
+  available: () => cliOnPath("codex"),
+  async run(req) {
+    const prompt = `${req.systemPrompt}
+
+${req.userPrompt}`;
+    const args = ["exec", "--sandbox", "read-only", "--ask-for-approval", "never", "--skip-git-repo-check", prompt];
+    const res = await runCLI("codex", args, req.cwd, req.timeoutSec);
+    if (!res) return null;
+    return { text: res.stdout, isError: res.code !== 0 };
+  }
+};
+
+// src/core/review/backends/cursor.ts
+var cursorBackend = {
+  name: "cursor",
+  available: () => cliOnPath("cursor-agent"),
+  async run(req) {
+    const prompt = `${req.systemPrompt}
+
+${req.userPrompt}`;
+    const args = ["-p", prompt, "--output-format", "json", "--trust"];
+    const res = await runCLI("cursor-agent", args, req.cwd, req.timeoutSec);
+    if (!res) return null;
+    try {
+      const env = JSON.parse(res.stdout);
+      if (typeof env?.result === "string") return { text: env.result, isError: !!env.is_error };
+    } catch {
+    }
+    return null;
+  }
+};
+
+// src/core/review/backends/api.ts
+function provider(apiKeyEnv) {
+  return /openai/i.test(apiKeyEnv) ? "openai" : "anthropic";
+}
+var apiBackend = {
+  name: "api",
+  available(cfg) {
+    const env = cfg.reviewer.apiKeyEnv;
+    return !!(env && process.env[env]);
+  },
+  async run(req, cfg) {
+    const envName = cfg.reviewer.apiKeyEnv;
+    if (!envName) return null;
+    const key = process.env[envName];
+    if (!key) return null;
+    const kind = provider(envName);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), req.timeoutSec * 1e3);
+    try {
+      if (kind === "anthropic") {
+        const r2 = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+          body: JSON.stringify({
+            model: req.model || "claude-haiku-4-5",
+            max_tokens: 2048,
+            system: req.systemPrompt,
+            messages: [{ role: "user", content: req.userPrompt }]
+          }),
+          signal: controller.signal
+        });
+        if (!r2.ok) return null;
+        const j2 = await r2.json();
+        const text3 = j2?.content?.map((c) => c.text).filter(Boolean).join("\n") ?? "";
+        return { text: text3, isError: false };
+      }
+      const r = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model: req.model || "gpt-5",
+          messages: [
+            { role: "system", content: req.systemPrompt },
+            { role: "user", content: req.userPrompt }
+          ]
+        }),
+        signal: controller.signal
+      });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const text2 = j?.choices?.[0]?.message?.content ?? "";
+      return { text: text2, isError: false };
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+};
+
+// src/core/review/backends/json.ts
 function extractJSON(text2) {
   let t = text2.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   const firstObj = t.indexOf("{");
@@ -21483,6 +21594,51 @@ function extractJSON(text2) {
   } catch {
     return null;
   }
+}
+
+// src/core/review/backends/index.ts
+var BACKENDS = {
+  claude: claudeBackend,
+  codex: codexBackend,
+  cursor: cursorBackend,
+  api: apiBackend
+};
+var AUTO_ORDER = ["claude", "codex", "cursor"];
+var resolveCache = /* @__PURE__ */ new Map();
+function cacheKey(cfg) {
+  return `${cfg.reviewer.backend ?? "auto"}|${process.env.VOUCH_HOST ?? ""}|${cfg.reviewer.apiKeyEnv ?? ""}`;
+}
+function resolveBackend(cfg, backends = BACKENDS) {
+  const key = cacheKey(cfg);
+  if (resolveCache.has(key)) return resolveCache.get(key);
+  let chosen = null;
+  const explicit = cfg.reviewer.backend;
+  if (explicit && explicit !== "auto") {
+    const b = backends[explicit];
+    chosen = b && b.available(cfg) ? b : null;
+  } else {
+    const order = [];
+    const host = process.env.VOUCH_HOST;
+    if (host && backends[host]) order.push(host);
+    for (const n of AUTO_ORDER) if (!order.includes(n)) order.push(n);
+    for (const n of order) {
+      if (backends[n].available(cfg)) {
+        chosen = backends[n];
+        break;
+      }
+    }
+    if (!chosen && backends.api.available(cfg)) chosen = backends.api;
+  }
+  resolveCache.set(key, chosen);
+  return chosen;
+}
+function backendAvailable(cfg, backends) {
+  return resolveBackend(cfg, backends) != null;
+}
+async function runReviewer(req, cfg) {
+  const backend = resolveBackend(cfg);
+  if (!backend) return null;
+  return backend.run(req, cfg);
 }
 
 // src/core/review/map.ts
@@ -21557,14 +21713,17 @@ function mapChunkFindings(raw, cfg) {
   return out;
 }
 async function reviewChunk(opts) {
-  const res = await runClaude({
-    cwd: opts.proj,
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: buildUserPrompt(opts.intent, opts.chunk),
-    model: opts.cfg.reviewer.model,
-    timeoutSec: opts.cfg.reviewer.timeoutSec,
-    maxTurns: 8
-  });
+  const res = await runReviewer(
+    {
+      cwd: opts.proj,
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: buildUserPrompt(opts.intent, opts.chunk),
+      model: opts.cfg.reviewer.model,
+      timeoutSec: opts.cfg.reviewer.timeoutSec,
+      maxTurns: 8
+    },
+    opts.cfg
+  );
   if (!res || res.isError) return [];
   const parsed = extractJSON(res.text);
   if (!parsed) return [];
@@ -21669,14 +21828,17 @@ ${finding.evidence}
   ].filter(Boolean).join("\n");
 }
 async function askOne(proj2, finding, intent, cfg) {
-  const res = await runClaude({
-    cwd: proj2,
-    systemPrompt: VERIFIER_SYSTEM,
-    userPrompt: buildVerifierPrompt(finding, intent),
-    model: cfg.reviewer.model,
-    timeoutSec: cfg.reviewer.timeoutSec,
-    maxTurns: 6
-  });
+  const res = await runReviewer(
+    {
+      cwd: proj2,
+      systemPrompt: VERIFIER_SYSTEM,
+      userPrompt: buildVerifierPrompt(finding, intent),
+      model: cfg.reviewer.model,
+      timeoutSec: cfg.reviewer.timeoutSec,
+      maxTurns: 6
+    },
+    cfg
+  );
   if (!res || res.isError) return null;
   const parsed = extractJSON(res.text);
   if (!parsed || typeof parsed.real !== "boolean") return null;
@@ -21712,8 +21874,8 @@ async function verifyFindings(findings, opts) {
 }
 
 // src/core/reviewer.ts
-function reviewerAvailable() {
-  return claudeAvailable();
+function reviewerAvailable(cfg) {
+  return backendAvailable(cfg);
 }
 function fileReader(proj2) {
   return (rel) => {
@@ -22231,8 +22393,8 @@ async function runPipeline(opts) {
     skipped.push({ tier: "intent", reason: "no active intent captured (run /vouch:intent)" });
   } else if (!diff.isGit) {
     skipped.push({ tier: "intent", reason: "not a git repo \u2014 cannot scope a diff to review" });
-  } else if (!deps.reviewerAvailable()) {
-    skipped.push({ tier: "intent", reason: "`claude` CLI not available for the independent reviewer" });
+  } else if (!deps.reviewerAvailable(cfg)) {
+    skipped.push({ tier: "intent", reason: "no reviewer backend available (claude/codex/cursor CLI or API key)" });
   } else if (overBudget()) {
     budgetHit = true;
     skipped.push({ tier: "intent", reason: `time budget (${cfg.budgetSec}s) reached before intent review` });
@@ -22370,7 +22532,7 @@ function nowISO() {
 function text(s) {
   return { content: [{ type: "text", text: s }] };
 }
-var server = new McpServer({ name: "vouch", version: "0.2.1" });
+var server = new McpServer({ name: "vouch", version: "0.3.0" });
 var cmdSchema = external_exports.object({ cmd: external_exports.string(), enabled: external_exports.boolean() });
 server.tool(
   "record_intent",

@@ -6,7 +6,7 @@
 // the critique before the verdict.
 import { Finding, IntentRecord, VouchConfig } from '../types';
 import { makeFinding } from '../findings';
-import { runClaude, extractJSON } from './claude';
+import { runReviewer, extractJSON } from './backends';
 
 export interface ReviewChunk {
   /** Human label, e.g. the file path or "file (part 2/3)". */
@@ -97,14 +97,17 @@ export async function reviewChunk(opts: {
   chunk: ReviewChunk;
   cfg: VouchConfig;
 }): Promise<Finding[]> {
-  const res = await runClaude({
-    cwd: opts.proj,
-    systemPrompt: SYSTEM_PROMPT,
-    userPrompt: buildUserPrompt(opts.intent, opts.chunk),
-    model: opts.cfg.reviewer.model,
-    timeoutSec: opts.cfg.reviewer.timeoutSec,
-    maxTurns: 8,
-  });
+  const res = await runReviewer(
+    {
+      cwd: opts.proj,
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: buildUserPrompt(opts.intent, opts.chunk),
+      model: opts.cfg.reviewer.model,
+      timeoutSec: opts.cfg.reviewer.timeoutSec,
+      maxTurns: 8,
+    },
+    opts.cfg,
+  );
   if (!res || res.isError) return [];
   const parsed = extractJSON(res.text);
   if (!parsed) return [];

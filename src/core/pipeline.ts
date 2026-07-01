@@ -18,7 +18,7 @@ import { buildFixPrompt, summaryLine } from './prioritize';
 export interface PipelineDeps {
   runTier: typeof defaultRunTier;
   reviewIntent: typeof defaultReviewIntent;
-  reviewerAvailable: () => boolean;
+  reviewerAvailable: (cfg: VouchConfig) => boolean;
   workingDiff: (proj: string) => DiffResult;
 }
 
@@ -132,8 +132,8 @@ export async function runPipeline(opts: {
     skipped.push({ tier: 'intent', reason: 'no active intent captured (run /vouch:intent)' });
   } else if (!diff.isGit) {
     skipped.push({ tier: 'intent', reason: 'not a git repo — cannot scope a diff to review' });
-  } else if (!deps.reviewerAvailable()) {
-    skipped.push({ tier: 'intent', reason: '`claude` CLI not available for the independent reviewer' });
+  } else if (!deps.reviewerAvailable(cfg)) {
+    skipped.push({ tier: 'intent', reason: 'no reviewer backend available (claude/codex/cursor CLI or API key)' });
   } else if (overBudget()) {
     // Don't start the slow reviewer if we'd risk blowing the Stop-hook timeout.
     budgetHit = true;

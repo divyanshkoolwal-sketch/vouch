@@ -1,21 +1,23 @@
 #!/bin/bash
-# Stop hook: hand the hook payload to the Vouch "brain" (dist/cli.js stop-hook),
-# which decides whether to block (with a fix-prompt) or allow the stop.
-# This wrapper is intentionally dumb: all logic lives in the shared core.
-# It ALWAYS exits 0 and only ever emits the JSON the brain prints — on any
-# failure it prints nothing (which Claude Code reads as "allow stop").
+# Stop hook (Claude Code AND Codex — identical contract). Hands the hook payload
+# to the Vouch brain, which decides whether to block (with a fix-prompt) or allow
+# the stop. Tool-agnostic: resolves the CLI from its own location and the project
+# dir from whichever env the host sets. ALWAYS exits 0; prints only the JSON the
+# brain emits (nothing → "allow stop").
 set +e
 INPUT=$(cat 2>/dev/null)
 
-# Kill switch / recursion guard: when set we never run (e.g. inside the headless
-# reviewer child, or when the user ran /vouch-off).
+# Kill switch / recursion guard (also set when the reviewer spawns a host CLI).
 [ -n "${VOUCH_DISABLE:-}" ] && exit 0
 
-PROJ="${CLAUDE_PROJECT_DIR:-$PWD}"
+PROJ="${VOUCH_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-${CODEX_PROJECT_DIR:-$PWD}}}"
 [ -f "$PROJ/.vouch/config.json" ] || exit 0
-
 command -v node >/dev/null 2>&1 || exit 0
-[ -f "${CLAUDE_PLUGIN_ROOT}/dist/cli.js" ] || exit 0
 
-printf '%s' "$INPUT" | VOUCH_PROJECT_DIR="$PROJ" node "${CLAUDE_PLUGIN_ROOT}/dist/cli.js" stop-hook 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+CLI="$SELF_DIR/../dist/cli.js"
+[ -f "$CLI" ] || CLI="${CLAUDE_PLUGIN_ROOT:-}/dist/cli.js"
+[ -f "$CLI" ] || exit 0
+
+printf '%s' "$INPUT" | VOUCH_PROJECT_DIR="$PROJ" node "$CLI" stop-hook 2>/dev/null || true
 exit 0

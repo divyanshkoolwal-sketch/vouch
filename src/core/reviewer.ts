@@ -6,15 +6,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Finding, IntentRecord, VouchConfig } from './types';
-import { claudeAvailable } from './review/claude';
+import { backendAvailable } from './review/backends';
 import { ReviewChunk, reviewChunk } from './review/map';
 import { reduceFindings } from './review/reduce';
 import { groundFindings } from './review/groundGate';
 import { verifyFindings } from './review/verify';
 import { mapLimit } from './review/concurrency';
 
-export function reviewerAvailable(): boolean {
-  return claudeAvailable();
+export function reviewerAvailable(cfg: VouchConfig): boolean {
+  return backendAvailable(cfg);
 }
 
 function fileReader(proj: string): (rel: string) => string | null {
