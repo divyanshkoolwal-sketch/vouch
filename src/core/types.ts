@@ -25,6 +25,32 @@ export interface Finding {
   /** The exact command that produced a fact (for reproduction in the fix-prompt). */
   command?: string;
   confidence: Confidence;
+  // --- v0.2 grounding fields (behavioral/intent findings) ---
+  /** Verbatim snippet of the offending code the model quoted. The deterministic
+   *  evidence gate REQUIRES this to appear literally in the code, or the finding
+   *  is dropped — this is the load-bearing anti-hallucination guarantee. */
+  evidence?: string;
+  startLine?: number;
+  endLine?: number;
+  /** The acceptance criterion this finding relates to. */
+  criterion?: string;
+  /** True once an independent (Chain-of-Verification) pass confirmed it. */
+  verified?: boolean;
+  /** Numeric confidence 0..1 (from quorum agreement + the model's own score). */
+  score?: number;
+}
+
+/** Honest accounting of what verification actually covered — never conflate
+ *  "clean" with "skipped" or "truncated". */
+export interface CoverageReport {
+  filesChanged: number;
+  filesReviewed: number;
+  filesSkippedTooLarge: string[];
+  chunksReviewed: number;
+  packagesScoped: string[];
+  testsSelected: number | null; // null = ran full suite / TIA not applicable
+  budgetHit: boolean;
+  notes: string[];
 }
 
 export interface IntentRecord {
@@ -73,7 +99,28 @@ export interface VouchConfig {
     /** Optional model id override for the headless reviewer (omit = inherit). */
     model?: string;
     timeoutSec: number;
-    /** Per-tier command timeout. */
+  };
+  /** Verification intensity. thorough = full map-reduce + N-vote verification
+   *  (max accuracy, default); bounded = cap chunks + single refutation;
+   *  fast = one grounded pass + evidence gate only. */
+  mode: 'thorough' | 'bounded' | 'fast';
+  review: {
+    /** Max concurrent headless review calls. */
+    concurrency: number;
+    /** Chain-of-Verification quorum size (independent refutation votes). */
+    quorumN: number;
+    /** Token budget per review chunk (rough estimate, chars/4). */
+    chunkTokenBudget: number;
+    /** Hard cap on files reviewed by the LLM in one run (rest reported as skipped). */
+    maxReviewFiles: number;
+    /** Drop verified findings below this numeric confidence. */
+    minConfidence: number;
+  };
+  tia: {
+    /** Run only tests affected by the change (with safe fallbacks). */
+    enabled: boolean;
+    /** Base branch/ref to diff against for merge-base scoping (auto-detected if unset). */
+    baseRef?: string;
   };
   /** Per-deterministic-command timeout (seconds). */
   commandTimeoutSec: number;
@@ -96,4 +143,6 @@ export interface VerifyResult {
   fixPrompt: string;
   /** One-line human summary. */
   summary: string;
+  /** What verification actually covered (v0.2). */
+  coverage?: CoverageReport;
 }

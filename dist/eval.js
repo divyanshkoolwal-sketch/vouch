@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 "use strict";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -23,145 +22,63 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   mod
 ));
 
-// src/core/memory.ts
-var fs = __toESM(require("fs"));
-var path = __toESM(require("path"));
-function vouchDir(proj) {
-  return path.join(proj, ".vouch");
-}
-function runsDir(proj) {
-  return path.join(vouchDir(proj), "runs");
-}
-function configPath(proj) {
-  return path.join(vouchDir(proj), "config.json");
-}
-function intentDir(proj) {
-  return path.join(vouchDir(proj), "intent");
-}
-function activeIntentPath(proj) {
-  return path.join(intentDir(proj), "active.json");
-}
-function dismissalsPath(proj) {
-  return path.join(vouchDir(proj), "dismissals.json");
-}
-function conventionsPath(proj) {
-  return path.join(vouchDir(proj), "conventions.md");
-}
-function statePath(proj) {
-  return path.join(runsDir(proj), "state.json");
-}
-function dirtyPath(proj) {
-  return path.join(runsDir(proj), "dirty");
-}
-function offPath(proj) {
-  return path.join(runsDir(proj), "off");
-}
-function findingsLogPath(proj) {
-  return path.join(runsDir(proj), "last-findings.json");
-}
-function readJSON(file, fallback) {
-  try {
-    if (!fs.existsSync(file)) return fallback;
-    const raw = fs.readFileSync(file, "utf8");
-    if (!raw.trim()) return fallback;
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
-}
-function writeJSON(file, obj) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n");
-}
-function readText(file, fallback = "") {
-  try {
-    return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : fallback;
-  } catch {
-    return fallback;
-  }
-}
-function exists(file) {
-  try {
-    return fs.existsSync(file);
-  } catch {
-    return false;
-  }
-}
+// src/eval/run.ts
+var fs4 = __toESM(require("fs"));
+var os = __toESM(require("os"));
+var path5 = __toESM(require("path"));
+var import_child_process4 = require("child_process");
 
-// src/core/config.ts
-function defaultConfig() {
-  return {
-    version: 1,
-    commands: {},
-    web: { enabled: false },
-    tiers: {
-      typecheck: true,
-      lint: true,
-      build: true,
-      test: true,
-      intent: true,
-      smoke: false
-    },
-    enforcement: {
-      block: true,
-      // Only objective, deterministic failures block by default. Lint and the
-      // LLM intent review are advisory unless the user opts them in — this is
-      // the core false-positive guardrail.
-      blockOn: ["typecheck", "build", "test"],
-      maxIterations: 3
-    },
-    reviewer: {
-      model: void 0,
-      timeoutSec: 90
-    },
-    // Default to max accuracy (per product decision): full map-reduce + N-vote
-    // independent verification. Budget-bounded so a huge repo degrades honestly
-    // rather than blowing the Stop-hook timeout.
-    mode: "thorough",
-    review: {
-      concurrency: 4,
-      quorumN: 3,
-      chunkTokenBudget: 6e3,
-      maxReviewFiles: 40,
-      minConfidence: 0.5
-    },
-    tia: {
-      enabled: true
-    },
-    commandTimeoutSec: 90,
-    budgetSec: 240
-  };
-}
-function normalizeConfig(stored) {
-  const d = defaultConfig();
-  if (!stored) return d;
-  return {
-    version: stored.version ?? d.version,
-    commands: { ...d.commands, ...stored.commands ?? {} },
-    web: { ...d.web, ...stored.web ?? {} },
-    tiers: { ...d.tiers, ...stored.tiers ?? {} },
-    enforcement: { ...d.enforcement, ...stored.enforcement ?? {} },
-    reviewer: { ...d.reviewer, ...stored.reviewer ?? {} },
-    mode: stored.mode ?? d.mode,
-    review: { ...d.review, ...stored.review ?? {} },
-    tia: { ...d.tia, ...stored.tia ?? {} },
-    commandTimeoutSec: stored.commandTimeoutSec ?? d.commandTimeoutSec,
-    budgetSec: stored.budgetSec ?? d.budgetSec
-  };
-}
-function loadConfig(proj) {
-  if (!exists(configPath(proj))) return null;
-  const stored = readJSON(configPath(proj), null);
-  return normalizeConfig(stored);
-}
-
-// src/core/intent.ts
-function loadActiveIntent(proj) {
-  if (!exists(activeIntentPath(proj))) return null;
-  const r = readJSON(activeIntentPath(proj), null);
-  if (!r || r.status !== "active") return null;
-  return r;
-}
+// src/eval/cases.ts
+var CASES = [
+  {
+    name: "bad-missing-upper-clamp",
+    bucket: "bad",
+    expect: "flag",
+    intent: { summary: "clamp(n) bounds its input to the inclusive range 0..100.", acceptance_criteria: ["returns 0 when n < 0", "returns 100 when n > 100", "returns n unchanged when 0<=n<=100"] },
+    baseline: { "clamp.js": "function clamp(n){ return n; }\nmodule.exports={clamp};\n" },
+    change: { "clamp.js": "function clamp(n){ if (n < 0) return 0; return n; }\nmodule.exports={clamp};\n" }
+  },
+  {
+    name: "bad-no-negative-rejection",
+    bucket: "bad",
+    expect: "flag",
+    intent: { summary: "parseAmount(s) parses a number and REJECTS negative amounts by returning null.", acceptance_criteria: ["returns the number for a valid non-negative amount", "returns null when the parsed amount is negative"] },
+    baseline: { "amount.js": "function parseAmount(s){ return Number(s); }\nmodule.exports={parseAmount};\n" },
+    change: { "amount.js": "function parseAmount(s){ const n = Number(s); if (Number.isNaN(n)) return null; return n; }\nmodule.exports={parseAmount};\n" }
+  },
+  {
+    name: "good-full-clamp",
+    bucket: "good",
+    expect: "clean",
+    intent: { summary: "clamp(n) bounds its input to the inclusive range 0..100.", acceptance_criteria: ["returns 0 when n < 0", "returns 100 when n > 100", "returns n unchanged when 0<=n<=100"] },
+    baseline: { "clamp.js": "function clamp(n){ return n; }\nmodule.exports={clamp};\n" },
+    change: { "clamp.js": "function clamp(n){ if (n < 0) return 0; if (n > 100) return 100; return n; }\nmodule.exports={clamp};\n" }
+  },
+  {
+    name: "good-simple-sum",
+    bucket: "good",
+    expect: "clean",
+    intent: { summary: "add(a,b) returns the sum of a and b.", acceptance_criteria: ["add(2,3) === 5", "handles negative numbers"] },
+    baseline: { "add.js": "module.exports={};\n" },
+    change: { "add.js": "function add(a,b){ return a + b; }\nmodule.exports={add};\n" }
+  },
+  {
+    name: "hardneg-intentional-empty-catch",
+    bucket: "hardneg",
+    expect: "clean",
+    intent: { summary: "readConfig() returns parsed JSON config, or {} if the file is missing or invalid.", acceptance_criteria: ["returns the parsed object when the file is valid JSON", "returns {} when the file is missing or invalid (never throws)"], non_goals: ["logging the error"] },
+    baseline: { "config.js": 'const fs=require("fs");\nfunction readConfig(){ return JSON.parse(fs.readFileSync("c.json","utf8")); }\nmodule.exports={readConfig};\n' },
+    change: { "config.js": 'const fs=require("fs");\nfunction readConfig(){\n  try { return JSON.parse(fs.readFileSync("c.json","utf8")); }\n  catch { return {}; } // missing/invalid \u2192 default, by design\n}\nmodule.exports={readConfig};\n' }
+  },
+  {
+    name: "hardneg-order-unusual-but-correct",
+    bucket: "hardneg",
+    expect: "clean",
+    intent: { summary: 'isValid(s) returns true only for a non-empty string containing "@".', acceptance_criteria: ['true for "a@b"', 'false for "" and for a string without @'], non_goals: ["full RFC email validation", "trimming whitespace", "null handling"] },
+    baseline: { "valid.js": "module.exports={};\n" },
+    change: { "valid.js": 'function isValid(s){ return s.length > 0 && s.includes("@"); }\nmodule.exports={isValid};\n' }
+  }
+];
 
 // src/core/runners.ts
 var import_child_process = require("child_process");
@@ -276,8 +193,8 @@ async function runTier(tier, rc, cwd, timeoutMs, blocking) {
 }
 
 // src/core/reviewer.ts
-var fs2 = __toESM(require("fs"));
-var path2 = __toESM(require("path"));
+var fs = __toESM(require("fs"));
+var path = __toESM(require("path"));
 
 // src/core/review/claude.ts
 var import_child_process2 = require("child_process");
@@ -601,7 +518,7 @@ function reviewerAvailable() {
 function fileReader(proj) {
   return (rel) => {
     try {
-      return fs2.readFileSync(path2.join(proj, rel), "utf8");
+      return fs.readFileSync(path.join(proj, rel), "utf8");
     } catch {
       return null;
     }
@@ -622,8 +539,8 @@ async function reviewIntent(opts) {
 // src/core/diff.ts
 var import_child_process3 = require("child_process");
 var import_crypto2 = require("crypto");
-var fs3 = __toESM(require("fs"));
-var path3 = __toESM(require("path"));
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
 var EXCLUDE_VOUCH = ":(exclude).vouch";
 var MAX_UNTRACKED_FILE_LINES = 800;
 function git(proj, args) {
@@ -698,10 +615,10 @@ function workingDiff(proj, baseOverride) {
   for (const f of untracked) {
     fileSet.add(f);
     try {
-      const full = path3.join(proj, f);
-      const st = fs3.statSync(full);
+      const full = path2.join(proj, f);
+      const st = fs2.statSync(full);
       if (st.isDirectory() || st.size > 512 * 1024) continue;
-      const lines = fs3.readFileSync(full, "utf8").split("\n").slice(0, MAX_UNTRACKED_FILE_LINES);
+      const lines = fs2.readFileSync(full, "utf8").split("\n").slice(0, MAX_UNTRACKED_FILE_LINES);
       const body = lines.map((l, i) => `${i + 1}: +${l}`).join("\n");
       perFile.push({ file: f, patch: `=== new file: ${f} ===
 ${body}`, addedLines: lines.length });
@@ -790,6 +707,57 @@ function buildChunks(perFile, cfg) {
     skippedFiles,
     clippedFiles: [...new Set(clippedFiles)]
   };
+}
+
+// src/core/memory.ts
+var fs3 = __toESM(require("fs"));
+var path3 = __toESM(require("path"));
+function vouchDir(proj) {
+  return path3.join(proj, ".vouch");
+}
+function runsDir(proj) {
+  return path3.join(vouchDir(proj), "runs");
+}
+function configPath(proj) {
+  return path3.join(vouchDir(proj), "config.json");
+}
+function intentDir(proj) {
+  return path3.join(vouchDir(proj), "intent");
+}
+function activeIntentPath(proj) {
+  return path3.join(intentDir(proj), "active.json");
+}
+function dismissalsPath(proj) {
+  return path3.join(vouchDir(proj), "dismissals.json");
+}
+function ensureVouchDir(proj) {
+  fs3.mkdirSync(runsDir(proj), { recursive: true });
+  fs3.mkdirSync(intentDir(proj), { recursive: true });
+  const gi = path3.join(vouchDir(proj), ".gitignore");
+  if (!fs3.existsSync(gi)) {
+    fs3.writeFileSync(gi, "runs/\n");
+  }
+}
+function readJSON(file, fallback) {
+  try {
+    if (!fs3.existsSync(file)) return fallback;
+    const raw = fs3.readFileSync(file, "utf8");
+    if (!raw.trim()) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function writeJSON(file, obj) {
+  fs3.mkdirSync(path3.dirname(file), { recursive: true });
+  fs3.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n");
+}
+function exists(file) {
+  try {
+    return fs3.existsSync(file);
+  } catch {
+    return false;
+  }
 }
 
 // src/core/dismissals.ts
@@ -966,191 +934,160 @@ async function runPipeline(opts) {
   };
 }
 
-// src/core/runState.ts
-var fs4 = __toESM(require("fs"));
-function loadState(proj) {
-  return readJSON(statePath(proj), { lastDiffHash: null, iteration: 0 });
+// src/core/config.ts
+function defaultConfig() {
+  return {
+    version: 1,
+    commands: {},
+    web: { enabled: false },
+    tiers: {
+      typecheck: true,
+      lint: true,
+      build: true,
+      test: true,
+      intent: true,
+      smoke: false
+    },
+    enforcement: {
+      block: true,
+      // Only objective, deterministic failures block by default. Lint and the
+      // LLM intent review are advisory unless the user opts them in — this is
+      // the core false-positive guardrail.
+      blockOn: ["typecheck", "build", "test"],
+      maxIterations: 3
+    },
+    reviewer: {
+      model: void 0,
+      timeoutSec: 90
+    },
+    // Default to max accuracy (per product decision): full map-reduce + N-vote
+    // independent verification. Budget-bounded so a huge repo degrades honestly
+    // rather than blowing the Stop-hook timeout.
+    mode: "thorough",
+    review: {
+      concurrency: 4,
+      quorumN: 3,
+      chunkTokenBudget: 6e3,
+      maxReviewFiles: 40,
+      minConfidence: 0.5
+    },
+    tia: {
+      enabled: true
+    },
+    commandTimeoutSec: 90,
+    budgetSec: 240
+  };
 }
-function saveState(proj, state) {
-  fs4.mkdirSync(runsDir(proj), { recursive: true });
-  writeJSON(statePath(proj), state);
-}
-function isDirty(proj) {
-  try {
-    return fs4.existsSync(dirtyPath(proj)) && fs4.statSync(dirtyPath(proj)).size > 0;
-  } catch {
-    return false;
-  }
-}
-function clearDirty(proj) {
-  try {
-    if (fs4.existsSync(dirtyPath(proj))) fs4.rmSync(dirtyPath(proj));
-  } catch {
-  }
-}
-function markDirty(proj) {
-  fs4.mkdirSync(runsDir(proj), { recursive: true });
-  fs4.appendFileSync(dirtyPath(proj), `${Date.now()}
-`);
+function saveConfig(proj, cfg) {
+  ensureVouchDir(proj);
+  writeJSON(configPath(proj), cfg);
 }
 
-// src/cli.ts
+// src/core/intent.ts
 var path4 = __toESM(require("path"));
-function resolveProj(stdinObj) {
-  return process.env.VOUCH_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR || (stdinObj && typeof stdinObj.cwd === "string" ? stdinObj.cwd : "") || process.cwd();
+function loadActiveIntent(proj) {
+  if (!exists(activeIntentPath(proj))) return null;
+  const r = readJSON(activeIntentPath(proj), null);
+  if (!r || r.status !== "active") return null;
+  return r;
 }
-function readStdin() {
-  return new Promise((resolve) => {
-    let data = "";
-    if (process.stdin.isTTY) {
-      resolve("");
-      return;
-    }
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (c) => data += c);
-    process.stdin.on("end", () => resolve(data));
-    process.stdin.on("error", () => resolve(data));
-    setTimeout(() => resolve(data), 2e3);
-  });
+function newId(nowISO) {
+  const t = Date.parse(nowISO) || Date.now();
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `i_${t.toString(36)}_${rand}`;
 }
-function printHookJSON(obj) {
-  process.stdout.write(JSON.stringify(obj));
+function recordIntent(proj, input, nowISO) {
+  ensureVouchDir(proj);
+  const prev = loadActiveIntent(proj);
+  if (prev) {
+    prev.status = "archived";
+    writeJSON(path4.join(intentDir(proj), `${prev.id}.json`), prev);
+  }
+  const record = {
+    id: newId(nowISO),
+    summary: input.summary.trim(),
+    acceptance_criteria: (input.acceptance_criteria ?? []).map((s) => s.trim()).filter(Boolean),
+    scope_globs: input.scope_globs?.map((s) => s.trim()).filter(Boolean),
+    non_goals: input.non_goals?.map((s) => s.trim()).filter(Boolean),
+    created: nowISO,
+    status: "active"
+  };
+  writeJSON(activeIntentPath(proj), record);
+  return record;
 }
-function writeFindingsLog(proj, result) {
-  try {
-    writeJSON(findingsLogPath(proj), {
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      summary: result.summary,
-      blocking: result.blocking,
-      questions: result.questions,
-      notices: result.notices,
-      skipped: result.skipped,
-      ranTiers: result.ranTiers
-    });
-  } catch {
-  }
+
+// src/eval/run.ts
+var FP_GATE = 0.1;
+var RECALL_FLOOR = 0.5;
+function sh(proj, args) {
+  (0, import_child_process4.execFileSync)("git", args, { cwd: proj, stdio: "ignore" });
 }
-function looksLikeProject(proj) {
-  return exists(path4.join(proj, ".git")) || exists(path4.join(proj, "package.json")) || exists(path4.join(proj, "pyproject.toml")) || exists(path4.join(proj, "requirements.txt")) || exists(path4.join(proj, "Makefile"));
-}
-async function stopHook() {
-  const input = await readStdin();
-  let hook = {};
-  try {
-    hook = JSON.parse(input);
-  } catch {
-  }
-  const proj = resolveProj(hook);
-  const cfg = loadConfig(proj);
-  if (!cfg) return;
-  if (exists(offPath(proj))) return;
-  const state = loadState(proj);
-  const diff = workingDiff(proj);
-  const dirty = isDirty(proj);
-  if (!diff.patch) {
-    clearDirty(proj);
-    saveState(proj, { lastDiffHash: diff.hash || null, iteration: 0 });
-    return;
-  }
-  if (!dirty && diff.hash === state.lastDiffHash) return;
-  const stopActive = !!hook.stop_hook_active;
-  if (cfg.enforcement.block && stopActive && state.iteration >= cfg.enforcement.maxIterations) {
-    const result2 = await runPipeline({ proj, cfg, intent: loadActiveIntent(proj) });
-    writeFindingsLog(proj, result2);
-    clearDirty(proj);
-    saveState(proj, { lastDiffHash: diff.hash || null, iteration: 0 });
-    printHookJSON({
-      systemMessage: `Vouch: released after ${cfg.enforcement.maxIterations} fix rounds \u2014 ${result2.blocking.length} issue(s) still unresolved. Run /vouch:status for details.`
-    });
-    return;
-  }
-  const round = state.iteration + 1;
-  const result = await runPipeline({
-    proj,
-    cfg,
-    intent: loadActiveIntent(proj),
-    roundInfo: `(verification round ${round}/${cfg.enforcement.maxIterations})`
-  });
-  writeFindingsLog(proj, result);
-  if (cfg.enforcement.block && result.blocking.length) {
-    saveState(proj, { lastDiffHash: state.lastDiffHash, iteration: round });
-    printHookJSON({
-      decision: "block",
-      reason: result.fixPrompt,
-      systemMessage: `${result.summary} \u2014 blocking (round ${round}/${cfg.enforcement.maxIterations})`
-    });
-    return;
-  }
-  clearDirty(proj);
-  saveState(proj, { lastDiffHash: diff.hash || null, iteration: 0 });
-  printHookJSON({ systemMessage: result.summary });
-}
-function sessionContext() {
-  const proj = resolveProj();
-  const cfg = loadConfig(proj);
-  if (!cfg) {
-    if (looksLikeProject(proj)) {
-      process.stdout.write(
-        "[Vouch] installed but not set up for this repo. Run /vouch:setup to auto-detect how to run your checks and enable automatic verification (takes ~10s)."
-      );
-    }
-    return;
-  }
-  const lines = [
-    "[Vouch] active here: when you finish a change, Vouch automatically runs the project checks and an independent intent review, and will ask you to fix verified failures before stopping."
-  ];
-  const intent = loadActiveIntent(proj);
-  if (intent) {
-    lines.push(`
-Active intent: ${intent.summary}`);
-    if (intent.acceptance_criteria.length) {
-      lines.push("Acceptance criteria:");
-      intent.acceptance_criteria.forEach((c, i) => lines.push(`  ${i + 1}. ${c}`));
-    }
-  }
-  const conv = readText(conventionsPath(proj)).trim();
-  if (conv) lines.push(`
-Project conventions (from Vouch memory):
-${conv.slice(0, 2e3)}`);
-  process.stdout.write(lines.join("\n"));
-}
-async function verifyManual() {
-  const proj = resolveProj();
-  const cfg = loadConfig(proj);
-  if (!cfg) {
-    process.stdout.write("Vouch is not set up for this repo. Run /vouch:setup first.\n");
-    return;
-  }
-  const result = await runPipeline({ proj, cfg, intent: loadActiveIntent(proj), force: true });
-  writeFindingsLog(proj, result);
-  const out = [result.summary];
-  out.push(`ran: ${result.ranTiers.join(", ") || "(none)"}`);
-  if (result.skipped.length) out.push(`skipped: ${result.skipped.map((s) => `${s.tier} (${s.reason})`).join("; ")}`);
-  if (result.fixPrompt) {
-    out.push("\n" + result.fixPrompt);
-  } else {
-    if (result.notices.length) {
-      out.push("\nNon-blocking failures:");
-      result.notices.forEach((n) => out.push(`- [${n.tier}] ${n.title}${n.command ? ` \u2014 ${n.command}` : ""} (id: ${n.id})`));
-    }
-    if (result.questions.length) {
-      out.push("\nOpen questions:");
-      result.questions.forEach((q) => out.push(`- [${q.tier}] ${q.title} (id: ${q.id})`));
-    }
-  }
-  process.stdout.write(out.join("\n") + "\n");
+function setupCase(c) {
+  const proj = fs4.mkdtempSync(path5.join(os.tmpdir(), "vouch-eval-"));
+  sh(proj, ["init", "-q"]);
+  sh(proj, ["config", "user.email", "e@e.e"]);
+  sh(proj, ["config", "user.name", "e"]);
+  for (const [f, content] of Object.entries(c.baseline)) fs4.writeFileSync(path5.join(proj, f), content);
+  sh(proj, ["add", "-A"]);
+  sh(proj, ["commit", "-qm", "baseline"]);
+  for (const [f, content] of Object.entries(c.change)) fs4.writeFileSync(path5.join(proj, f), content);
+  const cfg = defaultConfig();
+  cfg.tiers = { typecheck: false, lint: false, build: false, test: false, intent: true, smoke: false };
+  const mode = process.env.VOUCH_EVAL_MODE || "bounded";
+  cfg.mode = mode;
+  if (mode === "bounded") cfg.review.quorumN = 1;
+  cfg.reviewer.timeoutSec = 90;
+  saveConfig(proj, cfg);
+  recordIntent(proj, c.intent, (/* @__PURE__ */ new Date()).toISOString());
+  return proj;
 }
 async function main() {
-  const sub = process.argv[2];
-  try {
-    if (sub === "stop-hook") await stopHook();
-    else if (sub === "session-context") sessionContext();
-    else if (sub === "verify") await verifyManual();
-    else if (sub === "mark-dirty") markDirty(resolveProj());
-    else process.stdout.write(`vouch cli: unknown subcommand "${sub ?? ""}"
+  const only = process.env.VOUCH_EVAL_ONLY;
+  const cases = only ? CASES.filter((c) => c.name.includes(only)) : CASES;
+  console.log(`Running ${cases.length} eval cases (mode=${process.env.VOUCH_EVAL_MODE || "bounded"})\u2026
 `);
-  } catch {
+  let tp = 0, fp = 0, tn = 0, fn = 0;
+  const rows = [];
+  for (const c of cases) {
+    const proj = setupCase(c);
+    let flagged = false;
+    let detail = "";
+    try {
+      const cfg = defaultConfig();
+      cfg.tiers = { typecheck: false, lint: false, build: false, test: false, intent: true, smoke: false };
+      cfg.mode = process.env.VOUCH_EVAL_MODE || "bounded";
+      if (cfg.mode === "bounded") cfg.review.quorumN = 1;
+      const intent = JSON.parse(fs4.readFileSync(path5.join(proj, ".vouch/intent/active.json"), "utf8"));
+      const res = await runPipeline({ proj, cfg, intent, force: true });
+      const surfaced = [...res.blocking, ...res.questions];
+      flagged = surfaced.length > 0;
+      detail = surfaced.map((f) => f.title).join("; ").slice(0, 80);
+    } catch (e) {
+      detail = "ERROR " + (e?.message ?? e);
+    } finally {
+      fs4.rmSync(proj, { recursive: true, force: true });
+    }
+    const correct = c.expect === "flag" === flagged;
+    if (c.expect === "flag") flagged ? tp++ : fn++;
+    else flagged ? fp++ : tn++;
+    rows.push(`  ${correct ? "\u2705" : "\u274C"} [${c.bucket}] ${c.name} \u2192 ${flagged ? "FLAGGED" : "clean"}${detail ? `  (${detail})` : ""}`);
   }
-  process.exit(0);
+  const precision = tp + fp === 0 ? 1 : tp / (tp + fp);
+  const recall = tp + fn === 0 ? 1 : tp / (tp + fn);
+  const cleanTotal = fp + tn;
+  const fpRate = cleanTotal === 0 ? 0 : fp / cleanTotal;
+  const f1 = precision + recall === 0 ? 0 : 2 * precision * recall / (precision + recall);
+  console.log(rows.join("\n"));
+  console.log("\n\u2014 Confusion matrix \u2014");
+  console.log(`  TP ${tp}  FP ${fp}  TN ${tn}  FN ${fn}`);
+  console.log(`  precision ${(precision * 100).toFixed(0)}%  recall ${(recall * 100).toFixed(0)}%  F1 ${(f1 * 100).toFixed(0)}%`);
+  console.log(`  effective false-positive rate ${(fpRate * 100).toFixed(0)}%  (gate: <${FP_GATE * 100}%)`);
+  const pass = fpRate <= FP_GATE && recall >= RECALL_FLOOR;
+  console.log(`
+${pass ? "\u2705 PASS" : "\u274C FAIL"} \u2014 FP ${(fpRate * 100).toFixed(0)}% (\u2264${FP_GATE * 100}%), recall ${(recall * 100).toFixed(0)}% (\u2265${RECALL_FLOOR * 100}%)`);
+  process.exit(pass ? 0 : 1);
 }
-main();
+main().catch((e) => {
+  console.error("eval harness error:", e);
+  process.exit(2);
+});

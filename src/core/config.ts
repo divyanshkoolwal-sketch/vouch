@@ -29,8 +29,22 @@ export function defaultConfig(): VouchConfig {
       model: undefined,
       timeoutSec: 90,
     },
+    // Default to max accuracy (per product decision): full map-reduce + N-vote
+    // independent verification. Budget-bounded so a huge repo degrades honestly
+    // rather than blowing the Stop-hook timeout.
+    mode: 'thorough',
+    review: {
+      concurrency: 4,
+      quorumN: 3,
+      chunkTokenBudget: 6000,
+      maxReviewFiles: 40,
+      minConfidence: 0.5,
+    },
+    tia: {
+      enabled: true,
+    },
     commandTimeoutSec: 90,
-    budgetSec: 150,
+    budgetSec: 240,
   };
 }
 
@@ -45,6 +59,9 @@ export function normalizeConfig(stored: Partial<VouchConfig> | null): VouchConfi
     tiers: { ...d.tiers, ...(stored.tiers ?? {}) },
     enforcement: { ...d.enforcement, ...(stored.enforcement ?? {}) },
     reviewer: { ...d.reviewer, ...(stored.reviewer ?? {}) },
+    mode: stored.mode ?? d.mode,
+    review: { ...d.review, ...(stored.review ?? {}) },
+    tia: { ...d.tia, ...(stored.tia ?? {}) },
     commandTimeoutSec: stored.commandTimeoutSec ?? d.commandTimeoutSec,
     budgetSec: stored.budgetSec ?? d.budgetSec,
   };

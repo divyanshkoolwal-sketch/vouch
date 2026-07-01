@@ -15,4 +15,5 @@ const common = {
 
 await build({ ...common, entryPoints: ['src/mcp.ts'], outfile: 'dist/mcp.js' });
 await build({ ...common, entryPoints: ['src/cli.ts'], outfile: 'dist/cli.js' });
-console.log('vouch: built dist/mcp.js and dist/cli.js');
+await build({ ...common, entryPoints: ['src/eval/run.ts'], outfile: 'dist/eval.js' });
+console.log('vouch: built dist/mcp.js, dist/cli.js, dist/eval.js');

@@ -4,10 +4,11 @@
 // produce blocking "facts"; the LLM review produces non-blocking "questions"
 // (unless the user opts intent into blockOn). Dependencies are injectable so
 // the decision logic is unit-testable without spawning anything.
-import { Finding, IntentRecord, TierName, VouchConfig, VerifyResult } from './types';
+import { Finding, IntentRecord, TierName, VouchConfig, VerifyResult, CoverageReport } from './types';
 import { runTier as defaultRunTier, TierRun } from './runners';
 import { reviewIntent as defaultReviewIntent, reviewerAvailable as defaultReviewerAvailable } from './reviewer';
 import { workingDiff as defaultWorkingDiff, DiffResult } from './diff';
+import { buildChunks, BuildChunksResult } from './review/chunk';
 import { dedupe } from './findings';
 import { loadDismissals, filterDismissed } from './dismissals';
 import { buildFixPrompt, summaryLine } from './prioritize';
@@ -44,6 +45,8 @@ export async function runPipeline(opts: {
   const ranTiers: TierName[] = [];
   const skipped: { tier: TierName; reason: string }[] = [];
   let findings: Finding[] = [];
+  let budgetHit = false;
+  let built: BuildChunksResult | null = null;
 
   const diff = deps.workingDiff(proj);
   const diffEmpty = !diff.patch;
@@ -74,6 +77,7 @@ export async function runPipeline(opts: {
       continue;
     }
     if (overBudget()) {
+      budgetHit = true;
       skipped.push({ tier, reason: `time budget (${cfg.budgetSec}s) reached` });
       continue;
     }
@@ -109,10 +113,15 @@ export async function runPipeline(opts: {
     skipped.push({ tier: 'intent', reason: '`claude` CLI not available for the independent reviewer' });
   } else if (overBudget()) {
     // Don't start the slow reviewer if we'd risk blowing the Stop-hook timeout.
+    budgetHit = true;
     skipped.push({ tier: 'intent', reason: `time budget (${cfg.budgetSec}s) reached before intent review` });
   } else {
     ranTiers.push('intent');
-    const reviewFindings = await deps.reviewIntent({ proj, intent, patch: diff.patch, truncated: diff.truncated, cfg });
+    built = buildChunks(diff.perFile, cfg);
+    if (built.skippedFiles.length) {
+      skipped.push({ tier: 'intent', reason: `${built.skippedFiles.length} file(s) beyond maxReviewFiles not reviewed` });
+    }
+    const reviewFindings = await deps.reviewIntent({ proj, intent, cfg, chunks: built.chunks });
     findings.push(...reviewFindings);
   }
 
@@ -131,6 +140,17 @@ export async function runPipeline(opts: {
 
   const fixPrompt = blocking.length ? buildFixPrompt(blocking, questions, opts.roundInfo, notices) : '';
 
+  const coverage: CoverageReport = {
+    filesChanged: diff.perFile.length,
+    filesReviewed: built ? built.includedFiles.length : 0,
+    filesSkippedTooLarge: built ? [...built.skippedFiles, ...built.clippedFiles] : [],
+    chunksReviewed: built ? built.chunks.length : 0,
+    packagesScoped: [],
+    testsSelected: null,
+    budgetHit,
+    notes: [],
+  };
+
   return {
     diffEmpty,
     ranTiers,
@@ -141,5 +161,6 @@ export async function runPipeline(opts: {
     notices,
     fixPrompt,
     summary: summaryLine(blocking, questions, notices),
+    coverage,
   };
 }

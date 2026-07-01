@@ -1,18 +1,22 @@
-// Compute the change set to verify. Findings are scoped to this diff so Vouch
-// never flags code the user didn't touch. We look at the working tree relative
-// to HEAD (the agent's pending, usually-uncommitted work) plus untracked files.
+// Compute the change set to verify. v0.2: diff against the MERGE-BASE with the
+// base branch (so a whole feature branch is reviewed, not just uncommitted
+// edits), expand hunks to their enclosing function (`--function-context`) for
+// grounding, and expose a PER-FILE structure so the reviewer can map-reduce
+// instead of truncating. Vouch's own .vouch/ dir is always excluded.
 import { execFileSync } from 'child_process';
 import { createHash } from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 
-const MAX_PATCH_LINES = 1600; // bound prompt size / cost
-const MAX_UNTRACKED_FILE_LINES = 400;
+const EXCLUDE_VOUCH = ':(exclude).vouch';
+const MAX_UNTRACKED_FILE_LINES = 800;
 
 function git(proj: string, args: string[]): string {
   try {
     return execFileSync('git', args, {
       cwd: proj,
       encoding: 'utf8',
-      maxBuffer: 32 * 1024 * 1024,
+      maxBuffer: 64 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'ignore'],
     });
   } catch {
@@ -33,68 +37,108 @@ export function hasCommits(proj: string): boolean {
   }
 }
 
-export interface DiffResult {
-  patch: string;
-  files: string[];
-  hash: string;
-  truncated: boolean;
-  isGit: boolean;
+function verifyRef(proj: string, ref: string): boolean {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', ref], { cwd: proj, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-export function workingDiff(proj: string): DiffResult {
-  if (!isGitRepo(proj)) {
-    return { patch: '', files: [], hash: '', truncated: false, isGit: false };
+/** Determine the base to diff against: the merge-base with the repo's base
+ *  branch, so a feature branch's full change is reviewed. Falls back to HEAD
+ *  (working-tree-vs-HEAD) when there's no distinct base branch. */
+export function resolveBase(proj: string, override?: string): string {
+  if (!hasCommits(proj)) return '';
+  const head = git(proj, ['rev-parse', 'HEAD']).trim();
+  const candidates = override
+    ? [override]
+    : ['origin/HEAD', 'origin/main', 'origin/master', 'main', 'master', 'develop'];
+  for (const c of candidates) {
+    if (!verifyRef(proj, c)) continue;
+    const mb = git(proj, ['merge-base', 'HEAD', c]).trim();
+    if (mb && mb !== head) return mb;
   }
+  return 'HEAD';
+}
 
-  // Exclude Vouch's own memory dir — its transient runs/ files change every run
-  // and its durable files are not part of the change being verified. Without
-  // this, the diff is never empty and the change-gate never goes quiet.
-  const EXCLUDE_VOUCH = ':(exclude).vouch';
+export interface FileDiff {
+  file: string;
+  /** Function-context-expanded unified diff for this file. */
+  patch: string;
+  /** Rough size for ranking/chunking. */
+  addedLines: number;
+}
 
-  // Tracked changes vs HEAD (falls back to index diff in a repo with no commits).
-  let tracked = hasCommits(proj)
-    ? git(proj, ['diff', 'HEAD', '--', '.', EXCLUDE_VOUCH])
-    : git(proj, ['diff', '--cached', '--', '.', EXCLUDE_VOUCH]);
-  if (!tracked && !hasCommits(proj)) tracked = git(proj, ['diff', '--', '.', EXCLUDE_VOUCH]);
+export interface DiffResult {
+  patch: string; // combined (plain) — kept for hashing + back-compat
+  files: string[];
+  perFile: FileDiff[];
+  hash: string;
+  isGit: boolean;
+  base: string;
+}
 
-  // Untracked files: synthesize a readable block so the reviewer sees new files
-  // (a new file is a common way an agent "implements" something).
-  const untrackedList = git(proj, ['ls-files', '--others', '--exclude-standard'])
+function splitByFile(fcPatch: string): { file: string; patch: string }[] {
+  if (!fcPatch.trim()) return [];
+  const out: { file: string; patch: string }[] = [];
+  const parts = fcPatch.split(/^diff --git .*$/m);
+  const headers = fcPatch.match(/^diff --git .*$/gm) ?? [];
+  // parts[0] is preamble before the first header; align headers with the chunks after them.
+  for (let i = 0; i < headers.length; i++) {
+    const body = parts[i + 1] ?? '';
+    const m = body.match(/^\+\+\+ b\/(.+)$/m) || headers[i].match(/ b\/(.+)$/);
+    const file = (m ? m[1] : `file${i}`).trim();
+    out.push({ file, patch: headers[i] + '\n' + body.replace(/^\n/, '') });
+  }
+  return out;
+}
+
+function countAdded(patch: string): number {
+  return (patch.match(/^\+(?!\+\+)/gm) ?? []).length;
+}
+
+export function workingDiff(proj: string, baseOverride?: string): DiffResult {
+  if (!isGitRepo(proj)) {
+    return { patch: '', files: [], perFile: [], hash: '', isGit: false, base: '' };
+  }
+  const base = resolveBase(proj, baseOverride);
+  const baseArgs = base ? [base] : [];
+
+  // Plain diff (for hash + file list). Working tree vs base.
+  const plain = git(proj, ['diff', ...baseArgs, '--', '.', EXCLUDE_VOUCH]);
+  // Function-context diff (for review bodies).
+  const fc = git(proj, ['diff', '--function-context', ...baseArgs, '--', '.', EXCLUDE_VOUCH]);
+
+  const perFile: FileDiff[] = splitByFile(fc)
+    .filter((f) => f.file && !f.file.startsWith('.vouch/'))
+    .map((f) => ({ file: f.file, patch: f.patch, addedLines: countAdded(f.patch) }));
+
+  const fileSet = new Set<string>(perFile.map((f) => f.file));
+
+  // Untracked files: synthesize a new-file block so the reviewer sees them.
+  const untracked = git(proj, ['ls-files', '--others', '--exclude-standard'])
     .split('\n')
     .map((s) => s.trim())
     .filter(Boolean)
     .filter((f) => f !== '.vouch' && !f.startsWith('.vouch/'));
 
-  const fileSet = new Set<string>();
-  for (const line of tracked.split('\n')) {
-    const m = line.match(/^\+\+\+ b\/(.+)$/);
-    if (m) fileSet.add(m[1]);
-  }
-
-  let untrackedBlock = '';
-  const fs = require('fs') as typeof import('fs');
-  const path = require('path') as typeof import('path');
-  for (const f of untrackedList) {
+  for (const f of untracked) {
     fileSet.add(f);
     try {
       const full = path.join(proj, f);
-      const stat = fs.statSync(full);
-      if (stat.isDirectory() || stat.size > 256 * 1024) continue;
-      const content = fs.readFileSync(full, 'utf8').split('\n').slice(0, MAX_UNTRACKED_FILE_LINES);
-      untrackedBlock += `\n=== new file: ${f} ===\n${content.join('\n')}\n`;
+      const st = fs.statSync(full);
+      if (st.isDirectory() || st.size > 512 * 1024) continue;
+      const lines = fs.readFileSync(full, 'utf8').split('\n').slice(0, MAX_UNTRACKED_FILE_LINES);
+      const body = lines.map((l, i) => `${i + 1}: +${l}`).join('\n');
+      perFile.push({ file: f, patch: `=== new file: ${f} ===\n${body}`, addedLines: lines.length });
     } catch {
-      /* ignore unreadable/binary */
+      /* skip unreadable/binary */
     }
   }
 
-  let patch = tracked + (untrackedBlock ? `\n--- untracked files ---${untrackedBlock}` : '');
-  let truncated = false;
-  const lines = patch.split('\n');
-  if (lines.length > MAX_PATCH_LINES) {
-    patch = lines.slice(0, MAX_PATCH_LINES).join('\n') + `\n... [diff truncated at ${MAX_PATCH_LINES} lines] ...`;
-    truncated = true;
-  }
-
+  const patch = plain + (untracked.length ? `\n(untracked: ${untracked.join(', ')})` : '');
   const hash = patch ? createHash('sha1').update(patch).digest('hex').slice(0, 16) : '';
-  return { patch, files: [...fileSet], hash, truncated, isGit: true };
+  return { patch, files: [...fileSet], perFile, hash, isGit: true, base };
 }

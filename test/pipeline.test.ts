@@ -9,7 +9,14 @@ import { VouchConfig, IntentRecord, TierName, Finding } from '../src/core/types'
 import { tmpProj, rm } from './helpers';
 
 function diffOf(patch = 'some diff', hash = 'h1'): DiffResult {
-  return { patch, files: ['a.ts'], hash, truncated: false, isGit: true };
+  return {
+    patch,
+    files: ['a.ts'],
+    perFile: patch ? [{ file: 'a.ts', patch: '@@ -1 +1 @@\n+x', addedLines: 1 }] : [],
+    hash,
+    isGit: true,
+    base: 'HEAD',
+  };
 }
 
 function passTier(tier: TierName, cmd = `run ${tier}`): TierRun {

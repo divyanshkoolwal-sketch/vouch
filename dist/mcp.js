@@ -3226,8 +3226,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path4) {
-      let input = path4;
+    function removeDotSegments(path6) {
+      let input = path6;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3479,8 +3479,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path4, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path4 && path4 !== "/" ? path4 : void 0;
+        const [path6, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path6 && path6 !== "/" ? path6 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -6873,12 +6873,12 @@ var require_dist = __commonJS({
         throw new Error(`Unknown format "${name}"`);
       return f;
     };
-    function addFormats(ajv, list, fs5, exportName) {
+    function addFormats(ajv, list, fs7, exportName) {
       var _a;
       var _b;
       (_a = (_b = ajv.opts.code).formats) !== null && _a !== void 0 ? _a : _b.formats = (0, codegen_1._)`require("ajv-formats/dist/formats").${exportName}`;
       for (const f of list)
-        ajv.addFormat(f, fs5[f]);
+        ajv.addFormat(f, fs7[f]);
     }
     module2.exports = exports2 = formatsPlugin;
     Object.defineProperty(exports2, "__esModule", { value: true });
@@ -7364,8 +7364,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path4, errorMaps, issueData } = params;
-  const fullPath = [...path4, ...issueData.path || []];
+  const { data, path: path6, errorMaps, issueData } = params;
+  const fullPath = [...path6, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -7481,11 +7481,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path4, key) {
+  constructor(parent, value, path6, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path4;
+    this._path = path6;
     this._key = key;
   }
   get path() {
@@ -11123,10 +11123,10 @@ function assignProp(target, prop, value) {
     configurable: true
   });
 }
-function getElementAtPath(obj, path4) {
-  if (!path4)
+function getElementAtPath(obj, path6) {
+  if (!path6)
     return obj;
-  return path4.reduce((acc, key) => acc?.[key], obj);
+  return path6.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -11446,11 +11446,11 @@ function aborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path4, issues) {
+function prefixIssues(path6, issues) {
   return issues.map((iss) => {
     var _a;
     (_a = iss).path ?? (_a.path = []);
-    iss.path.unshift(path4);
+    iss.path.unshift(path6);
     return iss;
   });
 }
@@ -21189,8 +21189,22 @@ function defaultConfig() {
       model: void 0,
       timeoutSec: 90
     },
+    // Default to max accuracy (per product decision): full map-reduce + N-vote
+    // independent verification. Budget-bounded so a huge repo degrades honestly
+    // rather than blowing the Stop-hook timeout.
+    mode: "thorough",
+    review: {
+      concurrency: 4,
+      quorumN: 3,
+      chunkTokenBudget: 6e3,
+      maxReviewFiles: 40,
+      minConfidence: 0.5
+    },
+    tia: {
+      enabled: true
+    },
     commandTimeoutSec: 90,
-    budgetSec: 150
+    budgetSec: 240
   };
 }
 function normalizeConfig(stored) {
@@ -21203,6 +21217,9 @@ function normalizeConfig(stored) {
     tiers: { ...d.tiers, ...stored.tiers ?? {} },
     enforcement: { ...d.enforcement, ...stored.enforcement ?? {} },
     reviewer: { ...d.reviewer, ...stored.reviewer ?? {} },
+    mode: stored.mode ?? d.mode,
+    review: { ...d.review, ...stored.review ?? {} },
+    tia: { ...d.tia, ...stored.tia ?? {} },
     commandTimeoutSec: stored.commandTimeoutSec ?? d.commandTimeoutSec,
     budgetSec: stored.budgetSec ?? d.budgetSec
   };
@@ -21374,8 +21391,12 @@ async function runTier(tier, rc, cwd, timeoutMs, blocking) {
 }
 
 // src/core/reviewer.ts
+var fs3 = __toESM(require("fs"));
+var path3 = __toESM(require("path"));
+
+// src/core/review/claude.ts
 var import_child_process2 = require("child_process");
-function reviewerAvailable() {
+function claudeAvailable() {
   try {
     (0, import_child_process2.execFileSync)("claude", ["--version"], { stdio: "ignore" });
     return true;
@@ -21383,125 +21404,38 @@ function reviewerAvailable() {
     return false;
   }
 }
-var SYSTEM_PROMPT = [
-  "You are an independent verification reviewer for a code change. You did NOT write this code.",
-  "Your only job: decide whether the diff plausibly satisfies the stated INTENT and acceptance criteria, and surface concrete gaps.",
-  "",
-  "Rules \u2014 these exist to keep you from crying wolf:",
-  "- Default to raising NOTHING. Only report a finding when the diff gives you clear evidence.",
-  '- Strongly PREFER "question" over "blocking". Use "blocking" only when you can name the exact acceptance criterion that is unmet AND point to the exact missing or contradicting code.',
-  "- Judge ONLY the change in the diff against the intent. Do NOT report pre-existing issues, style/formatting nits, test coverage wishes, or speculative refactors.",
-  "- Do NOT report things that the project's own tests/types/build would already catch \u2014 that is handled separately.",
-  "- If the diff looks consistent with the intent, return an empty findings array. That is the expected, common answer.",
-  "",
-  "Output: a SINGLE JSON object and nothing else (no prose, no code fences):",
-  '{"findings":[{"severity":"blocking"|"question","criterion":"<the acceptance criterion this relates to, or \\"general\\">","title":"<short>","detail":"<why, with concrete reference to the diff>","file":"<path or omitted>"}]}'
-].join("\n");
-function buildUserPrompt(intent, patch, truncated) {
-  const ac = intent.acceptance_criteria.length ? intent.acceptance_criteria.map((c, i) => `  ${i + 1}. ${c}`).join("\n") : "  (none specified)";
-  const ng = intent.non_goals?.length ? intent.non_goals.map((c) => `  - ${c}`).join("\n") : "  (none)";
-  return [
-    "# INTENT",
-    intent.summary,
-    "",
-    "## Acceptance criteria",
-    ac,
-    "",
-    "## Non-goals (do not flag these as missing)",
-    ng,
-    "",
-    "# DIFF (the change to verify)",
-    truncated ? "(note: diff was truncated; judge only what is shown)" : "",
-    "```diff",
-    patch || "(empty diff)",
-    "```",
-    "",
-    "Return the JSON object now. Remember: empty findings is the common, correct answer when the change matches the intent."
-  ].join("\n");
-}
-function extractResult(stdout) {
-  try {
-    const env = JSON.parse(stdout);
-    if (typeof env?.result === "string") return { text: env.result, isError: !!env.is_error };
-    return null;
-  } catch {
-    return null;
-  }
-}
-function parseFindingsJSON(text2) {
-  let t = text2.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-  const first = t.indexOf("{");
-  const last = t.lastIndexOf("}");
-  if (first >= 0 && last > first) t = t.slice(first, last + 1);
-  try {
-    const obj = JSON.parse(t);
-    if (Array.isArray(obj?.findings)) return obj.findings;
-    if (Array.isArray(obj)) return obj;
-    return [];
-  } catch {
-    return [];
-  }
-}
-function mapReviewFindings(raw, cfg) {
-  const canBlock = cfg.enforcement.block && cfg.enforcement.blockOn.includes("intent");
-  const findings = [];
-  for (const r of raw) {
-    if (!r || typeof r.title !== "string") continue;
-    const severity = r.severity === "blocking" ? "blocking" : "question";
-    const kind = severity === "blocking" && canBlock ? "blocking" : "question";
-    findings.push(
-      makeFinding({
-        kind,
-        tier: "intent",
-        title: r.title.slice(0, 200),
-        detail: [r.criterion ? `Criterion: ${r.criterion}` : "", r.detail ?? ""].filter(Boolean).join("\n"),
-        file: typeof r.file === "string" ? r.file : void 0,
-        confidence: severity === "blocking" ? "high" : "medium",
-        fpExtra: [String(r.criterion ?? ""), String(r.file ?? "")]
-      })
-    );
-  }
-  return findings;
-}
-function reviewIntent(opts) {
-  const { proj: proj2, intent, patch, truncated, cfg } = opts;
-  const userPrompt = buildUserPrompt(intent, patch, truncated);
+function runClaude(opts) {
+  const allowed = opts.allowedTools ?? ["Read", "Grep", "Glob"];
   const args = [
     "-p",
-    userPrompt,
+    opts.userPrompt,
     "--output-format",
     "json",
     "--allowedTools",
-    "Read",
-    "Grep",
-    "Glob",
+    ...allowed,
     "--append-system-prompt",
-    SYSTEM_PROMPT,
+    opts.systemPrompt,
     "--max-turns",
-    "6"
+    String(opts.maxTurns ?? 8)
   ];
-  if (cfg.reviewer.model) args.push("--model", cfg.reviewer.model);
+  if (opts.model) args.push("--model", opts.model);
   return new Promise((resolve) => {
     let stdout = "";
     let settled = false;
-    const done = (findings) => {
+    const done = (v) => {
       if (settled) return;
       settled = true;
-      resolve(findings);
+      resolve(v);
     };
     let child;
     try {
       child = (0, import_child_process2.spawn)("claude", args, {
-        cwd: proj2,
-        // VOUCH_DISABLE=1 makes our OWN hooks no-op inside this child → no
-        // recursion. We intentionally do NOT pass --bare, because --bare reads
-        // auth only from ANTHROPIC_API_KEY and would break OAuth/subscription
-        // users; a normal `claude -p` inherits the user's existing auth.
+        cwd: opts.cwd,
         env: { ...process.env, VOUCH_DISABLE: "1" },
         stdio: ["ignore", "pipe", "ignore"]
       });
     } catch {
-      done([]);
+      done(null);
       return;
     }
     const timer = setTimeout(() => {
@@ -21515,33 +21449,304 @@ function reviewIntent(opts) {
         }, 2e3);
       } catch {
       }
-      done([]);
-    }, cfg.reviewer.timeoutSec * 1e3);
+      done(null);
+    }, opts.timeoutSec * 1e3);
     child.stdout?.on("data", (d) => stdout += d.toString());
     child.on("error", () => {
       clearTimeout(timer);
-      done([]);
+      done(null);
     });
     child.on("close", () => {
       clearTimeout(timer);
-      const res = extractResult(stdout);
-      if (!res || res.isError) return done([]);
-      done(mapReviewFindings(parseFindingsJSON(res.text), cfg));
+      try {
+        const env = JSON.parse(stdout);
+        if (typeof env?.result === "string") return done({ text: env.result, isError: !!env.is_error });
+      } catch {
+      }
+      done(null);
     });
   });
+}
+function extractJSON(text2) {
+  let t = text2.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const firstObj = t.indexOf("{");
+  const firstArr = t.indexOf("[");
+  const start = firstArr >= 0 && (firstObj < 0 || firstArr < firstObj) ? firstArr : firstObj;
+  if (start >= 0) {
+    const lastObj = t.lastIndexOf("}");
+    const lastArr = t.lastIndexOf("]");
+    const end = Math.max(lastObj, lastArr);
+    if (end > start) t = t.slice(start, end + 1);
+  }
+  try {
+    return JSON.parse(t);
+  } catch {
+    return null;
+  }
+}
+
+// src/core/review/map.ts
+var SYSTEM_PROMPT = [
+  "You are an INDEPENDENT verification reviewer. You did NOT write this code and have no stake in it.",
+  "Decide ONLY whether the change satisfies the stated INTENT and acceptance criteria, and surface concrete, grounded gaps.",
+  "",
+  "Hard rules (these keep you from crying wolf \u2014 violating them makes the tool useless):",
+  "- CORRECTNESS SUPERSEDES cleanliness, minimality, and style. Never flag a correct change for being ugly, verbose, or unconventional.",
+  "- Judge ONLY the shown change against the intent. Do NOT report pre-existing issues, style nits, missing tests, or speculative refactors.",
+  "- Do NOT report anything that the project's own tests/types/build/lint already cover \u2014 that is handled separately.",
+  "- If a requirement might be satisfied by code NOT shown, use your Read/Grep/Glob tools to check BEFORE reporting. If you still cannot prove a problem, ABSTAIN.",
+  "- For EVERY finding you MUST copy a VERBATIM `evidence` snippet EXACTLY from the code shown (or a file you Read), with its file and line range. If you cannot quote exact offending code, DO NOT report it.",
+  '- Prefer "question" severity. Use "blocking" only when you can name the exact unmet acceptance criterion AND quote the exact missing/contradicting code.',
+  "",
+  "Think first (a short `critique`), THEN emit findings. Output a SINGLE JSON object, no prose, no code fences:",
+  '{"critique":"<1-3 sentences>","findings":[{"criterion":"<which acceptance criterion, or \\"general\\">","severity":"blocking"|"question","title":"<short>","detail":"<why, concretely>","file":"<path>","startLine":<int>,"endLine":<int>,"evidence":"<verbatim code copied exactly from what you were shown>","confidence":<0..1>}]}',
+  "An empty findings array is the common, correct answer when the change matches the intent."
+].join("\n");
+function buildUserPrompt(intent, chunk) {
+  const ac = intent.acceptance_criteria.length ? intent.acceptance_criteria.map((c, i) => `  ${i + 1}. ${c}`).join("\n") : "  (none specified)";
+  const ng = intent.non_goals?.length ? intent.non_goals.map((c) => `  - ${c}`).join("\n") : "  (none)";
+  return [
+    "# INTENT",
+    intent.summary,
+    "",
+    "## Acceptance criteria",
+    ac,
+    "",
+    "## Non-goals (do NOT flag these as missing)",
+    ng,
+    "",
+    `# CHANGE TO VERIFY \u2014 ${chunk.label}`,
+    "(lines are shown with absolute line numbers; quote evidence exactly as shown)",
+    "```diff",
+    chunk.body || "(empty)",
+    "```",
+    "",
+    "Return the JSON object now."
+  ].join("\n");
+}
+function mapChunkFindings(raw, cfg) {
+  const arr = Array.isArray(raw?.findings) ? raw.findings : Array.isArray(raw) ? raw : [];
+  const canBlock = cfg.enforcement.block && cfg.enforcement.blockOn.includes("intent");
+  const out = [];
+  for (const r of arr) {
+    if (!r || typeof r.title !== "string") continue;
+    const severity = r.severity === "blocking" ? "blocking" : "question";
+    const kind = severity === "blocking" && canBlock ? "blocking" : "question";
+    const score = typeof r.confidence === "number" ? Math.max(0, Math.min(1, r.confidence)) : 0.6;
+    out.push(
+      makeFinding({
+        kind,
+        tier: "intent",
+        title: String(r.title).slice(0, 200),
+        detail: [r.criterion ? `Criterion: ${r.criterion}` : "", r.detail ?? ""].filter(Boolean).join("\n"),
+        file: typeof r.file === "string" ? r.file : void 0,
+        line: typeof r.startLine === "number" ? r.startLine : void 0,
+        confidence: severity === "blocking" ? "high" : "medium",
+        fpExtra: [String(r.criterion ?? ""), String(r.file ?? "")]
+      })
+    );
+    const f = out[out.length - 1];
+    f.evidence = typeof r.evidence === "string" ? r.evidence : void 0;
+    f.startLine = typeof r.startLine === "number" ? r.startLine : void 0;
+    f.endLine = typeof r.endLine === "number" ? r.endLine : void 0;
+    f.criterion = typeof r.criterion === "string" ? r.criterion : void 0;
+    f.score = score;
+  }
+  return out;
+}
+async function reviewChunk(opts) {
+  const res = await runClaude({
+    cwd: opts.proj,
+    systemPrompt: SYSTEM_PROMPT,
+    userPrompt: buildUserPrompt(opts.intent, opts.chunk),
+    model: opts.cfg.reviewer.model,
+    timeoutSec: opts.cfg.reviewer.timeoutSec,
+    maxTurns: 8
+  });
+  if (!res || res.isError) return [];
+  const parsed = extractJSON(res.text);
+  if (!parsed) return [];
+  return mapChunkFindings(parsed, opts.cfg);
+}
+
+// src/core/review/reduce.ts
+var KIND_RANK = { blocking: 2, question: 1, info: 0 };
+function reduceFindings(findings) {
+  return dedupe(findings).sort((a, b) => {
+    if (KIND_RANK[a.kind] !== KIND_RANK[b.kind]) return KIND_RANK[b.kind] - KIND_RANK[a.kind];
+    return (b.score ?? 0) - (a.score ?? 0);
+  });
+}
+
+// src/core/review/groundGate.ts
+function normalizeWs(s) {
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
+}
+function isGrounded(f) {
+  return f.tier === "intent" || f.evidence !== void 0;
+}
+function groundFindings(findings, readFile) {
+  const kept = [];
+  const dropped = [];
+  for (const f of findings) {
+    if (!isGrounded(f)) {
+      kept.push(f);
+      continue;
+    }
+    if (!f.evidence || !f.evidence.trim()) {
+      dropped.push({ finding: f, reason: "no verbatim evidence quoted" });
+      continue;
+    }
+    if (!f.file) {
+      dropped.push({ finding: f, reason: "no file cited" });
+      continue;
+    }
+    const content = readFile(f.file);
+    if (content == null) {
+      dropped.push({ finding: f, reason: `cited file not readable: ${f.file}` });
+      continue;
+    }
+    const needle = normalizeWs(f.evidence);
+    if (needle.length < 3) {
+      dropped.push({ finding: f, reason: "evidence too short to verify" });
+      continue;
+    }
+    if (!normalizeWs(content).includes(needle)) {
+      dropped.push({ finding: f, reason: "quoted evidence not found in cited file (fabricated)" });
+      continue;
+    }
+    kept.push(f);
+  }
+  return { kept, dropped };
+}
+
+// src/core/review/concurrency.ts
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const n = Math.max(1, Math.min(limit, items.length || 1));
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return results;
+}
+
+// src/core/review/verify.ts
+var VERIFIER_SYSTEM = [
+  "You are a strict, skeptical code verifier. An automated reviewer SUSPECTS a problem in a code change.",
+  "Your job: independently determine whether the problem is REAL by examining the actual code (use Read/Grep/Glob to check surrounding code, definitions, and whether the concern is already handled elsewhere).",
+  'Bias strongly toward "NOT a real problem": only confirm if you can concretely demonstrate it from the code. If the requirement is satisfied elsewhere, or you cannot prove the problem, mark it not real.',
+  "Do not be swayed by the reviewer's confidence. Reason from the code itself.",
+  'Output a SINGLE JSON object, no prose: {"real": true|false, "reason": "<short, cite code>", "confidence": <0..1>}'
+].join("\n");
+function buildVerifierPrompt(finding, intent) {
+  return [
+    `# INTENT
+${intent.summary}`,
+    finding.criterion ? `
+# RELEVANT ACCEPTANCE CRITERION
+${finding.criterion}` : "",
+    `
+# SUSPECTED PROBLEM (verify or refute)
+${finding.title}
+${finding.detail ?? ""}`,
+    finding.file ? `
+# LOCATION
+${finding.file}${finding.startLine ? `:${finding.startLine}-${finding.endLine ?? finding.startLine}` : ""}` : "",
+    finding.evidence ? `
+# CODE THE REVIEWER QUOTED
+\`\`\`
+${finding.evidence}
+\`\`\`` : "",
+    "\nExamine the real code and decide. Return the JSON verdict now."
+  ].filter(Boolean).join("\n");
+}
+async function askOne(proj2, finding, intent, cfg) {
+  const res = await runClaude({
+    cwd: proj2,
+    systemPrompt: VERIFIER_SYSTEM,
+    userPrompt: buildVerifierPrompt(finding, intent),
+    model: cfg.reviewer.model,
+    timeoutSec: cfg.reviewer.timeoutSec,
+    maxTurns: 6
+  });
+  if (!res || res.isError) return null;
+  const parsed = extractJSON(res.text);
+  if (!parsed || typeof parsed.real !== "boolean") return null;
+  return parsed.real;
+}
+async function verifyFindings(findings, opts) {
+  const ask = opts.deps?.askOne ?? askOne;
+  const n = Math.max(1, opts.cfg.review.quorumN);
+  const tasks = [];
+  findings.forEach((_, fi) => {
+    for (let v = 0; v < n; v++) tasks.push({ fi });
+  });
+  const votes = await mapLimit(
+    tasks,
+    opts.cfg.review.concurrency,
+    (t) => ask(opts.proj, findings[t.fi], opts.intent, opts.cfg)
+  );
+  const kept = [];
+  findings.forEach((f, fi) => {
+    const mine = votes.filter((_, i) => tasks[i].fi === fi);
+    const real = mine.filter((v) => v === true).length;
+    const refuted = mine.filter((v) => v === false).length;
+    const decided = real + refuted;
+    const confirmed = decided === 0 ? false : real > refuted;
+    const agreement = decided === 0 ? f.score ?? 0.5 : real / decided;
+    if (decided === 0) {
+      kept.push({ ...f, verified: false, score: f.score ?? 0.5 });
+    } else if (confirmed && agreement >= opts.cfg.review.minConfidence) {
+      kept.push({ ...f, verified: true, score: agreement });
+    }
+  });
+  return kept;
+}
+
+// src/core/reviewer.ts
+function reviewerAvailable() {
+  return claudeAvailable();
+}
+function fileReader(proj2) {
+  return (rel) => {
+    try {
+      return fs3.readFileSync(path3.join(proj2, rel), "utf8");
+    } catch {
+      return null;
+    }
+  };
+}
+async function reviewIntent(opts) {
+  const { proj: proj2, intent, cfg, chunks } = opts;
+  if (!chunks.length) return [];
+  const rc = opts.deps?.reviewChunk ?? reviewChunk;
+  const vf = opts.deps?.verifyFindings ?? verifyFindings;
+  const mapped = (await mapLimit(chunks, cfg.review.concurrency, (chunk) => rc({ proj: proj2, intent, chunk, cfg }))).flat();
+  const reduced = reduceFindings(mapped);
+  const grounded = groundFindings(reduced, fileReader(proj2)).kept;
+  if (cfg.mode === "fast" || grounded.length === 0) return grounded;
+  return vf(grounded, { proj: proj2, intent, cfg });
 }
 
 // src/core/diff.ts
 var import_child_process3 = require("child_process");
 var import_crypto2 = require("crypto");
-var MAX_PATCH_LINES = 1600;
-var MAX_UNTRACKED_FILE_LINES = 400;
+var fs4 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
+var EXCLUDE_VOUCH = ":(exclude).vouch";
+var MAX_UNTRACKED_FILE_LINES = 800;
 function git(proj2, args) {
   try {
     return (0, import_child_process3.execFileSync)("git", args, {
       cwd: proj2,
       encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024,
+      maxBuffer: 64 * 1024 * 1024,
       stdio: ["ignore", "pipe", "ignore"]
     });
   } catch {
@@ -21559,47 +21764,147 @@ function hasCommits(proj2) {
     return false;
   }
 }
-function workingDiff(proj2) {
+function verifyRef(proj2, ref) {
+  try {
+    (0, import_child_process3.execFileSync)("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: proj2, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function resolveBase(proj2, override) {
+  if (!hasCommits(proj2)) return "";
+  const head = git(proj2, ["rev-parse", "HEAD"]).trim();
+  const candidates = override ? [override] : ["origin/HEAD", "origin/main", "origin/master", "main", "master", "develop"];
+  for (const c of candidates) {
+    if (!verifyRef(proj2, c)) continue;
+    const mb = git(proj2, ["merge-base", "HEAD", c]).trim();
+    if (mb && mb !== head) return mb;
+  }
+  return "HEAD";
+}
+function splitByFile(fcPatch) {
+  if (!fcPatch.trim()) return [];
+  const out = [];
+  const parts = fcPatch.split(/^diff --git .*$/m);
+  const headers = fcPatch.match(/^diff --git .*$/gm) ?? [];
+  for (let i = 0; i < headers.length; i++) {
+    const body = parts[i + 1] ?? "";
+    const m = body.match(/^\+\+\+ b\/(.+)$/m) || headers[i].match(/ b\/(.+)$/);
+    const file = (m ? m[1] : `file${i}`).trim();
+    out.push({ file, patch: headers[i] + "\n" + body.replace(/^\n/, "") });
+  }
+  return out;
+}
+function countAdded(patch) {
+  return (patch.match(/^\+(?!\+\+)/gm) ?? []).length;
+}
+function workingDiff(proj2, baseOverride) {
   if (!isGitRepo(proj2)) {
-    return { patch: "", files: [], hash: "", truncated: false, isGit: false };
+    return { patch: "", files: [], perFile: [], hash: "", isGit: false, base: "" };
   }
-  const EXCLUDE_VOUCH = ":(exclude).vouch";
-  let tracked = hasCommits(proj2) ? git(proj2, ["diff", "HEAD", "--", ".", EXCLUDE_VOUCH]) : git(proj2, ["diff", "--cached", "--", ".", EXCLUDE_VOUCH]);
-  if (!tracked && !hasCommits(proj2)) tracked = git(proj2, ["diff", "--", ".", EXCLUDE_VOUCH]);
-  const untrackedList = git(proj2, ["ls-files", "--others", "--exclude-standard"]).split("\n").map((s) => s.trim()).filter(Boolean).filter((f) => f !== ".vouch" && !f.startsWith(".vouch/"));
-  const fileSet = /* @__PURE__ */ new Set();
-  for (const line of tracked.split("\n")) {
-    const m = line.match(/^\+\+\+ b\/(.+)$/);
-    if (m) fileSet.add(m[1]);
-  }
-  let untrackedBlock = "";
-  const fs5 = require("fs");
-  const path4 = require("path");
-  for (const f of untrackedList) {
+  const base = resolveBase(proj2, baseOverride);
+  const baseArgs = base ? [base] : [];
+  const plain = git(proj2, ["diff", ...baseArgs, "--", ".", EXCLUDE_VOUCH]);
+  const fc = git(proj2, ["diff", "--function-context", ...baseArgs, "--", ".", EXCLUDE_VOUCH]);
+  const perFile = splitByFile(fc).filter((f) => f.file && !f.file.startsWith(".vouch/")).map((f) => ({ file: f.file, patch: f.patch, addedLines: countAdded(f.patch) }));
+  const fileSet = new Set(perFile.map((f) => f.file));
+  const untracked = git(proj2, ["ls-files", "--others", "--exclude-standard"]).split("\n").map((s) => s.trim()).filter(Boolean).filter((f) => f !== ".vouch" && !f.startsWith(".vouch/"));
+  for (const f of untracked) {
     fileSet.add(f);
     try {
       const full = path4.join(proj2, f);
-      const stat = fs5.statSync(full);
-      if (stat.isDirectory() || stat.size > 256 * 1024) continue;
-      const content = fs5.readFileSync(full, "utf8").split("\n").slice(0, MAX_UNTRACKED_FILE_LINES);
-      untrackedBlock += `
-=== new file: ${f} ===
-${content.join("\n")}
-`;
+      const st = fs4.statSync(full);
+      if (st.isDirectory() || st.size > 512 * 1024) continue;
+      const lines = fs4.readFileSync(full, "utf8").split("\n").slice(0, MAX_UNTRACKED_FILE_LINES);
+      const body = lines.map((l, i) => `${i + 1}: +${l}`).join("\n");
+      perFile.push({ file: f, patch: `=== new file: ${f} ===
+${body}`, addedLines: lines.length });
     } catch {
     }
   }
-  let patch = tracked + (untrackedBlock ? `
---- untracked files ---${untrackedBlock}` : "");
-  let truncated = false;
-  const lines = patch.split("\n");
-  if (lines.length > MAX_PATCH_LINES) {
-    patch = lines.slice(0, MAX_PATCH_LINES).join("\n") + `
-... [diff truncated at ${MAX_PATCH_LINES} lines] ...`;
-    truncated = true;
-  }
+  const patch = plain + (untracked.length ? `
+(untracked: ${untracked.join(", ")})` : "");
   const hash = patch ? (0, import_crypto2.createHash)("sha1").update(patch).digest("hex").slice(0, 16) : "";
-  return { patch, files: [...fileSet], hash, truncated, isGit: true };
+  return { patch, files: [...fileSet], perFile, hash, isGit: true, base };
+}
+
+// src/core/review/chunk.ts
+function numberPatch(patch) {
+  if (patch.startsWith("=== new file:")) return patch;
+  const out = [];
+  let newLine = 0;
+  for (const line of patch.split("\n")) {
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      newLine = parseInt(hunk[1], 10);
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      out.push(`${newLine}: ${line}`);
+      newLine++;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      out.push(`   -${line.slice(1)}`);
+    } else if (line.startsWith(" ")) {
+      out.push(`${newLine}: ${line}`);
+      newLine++;
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
+function rankFiles(files) {
+  return [...files].sort((a, b) => b.addedLines - a.addedLines);
+}
+function splitHunks(patch) {
+  const idx = patch.search(/^@@/m);
+  if (idx < 0) return [patch];
+  const header = patch.slice(0, idx);
+  const rest = patch.slice(idx);
+  const hunks = rest.split(/(?=^@@ )/m).filter(Boolean);
+  return hunks.map((h, i) => i === 0 ? header + h : h);
+}
+function buildChunks(perFile, cfg) {
+  const budgetChars = cfg.review.chunkTokenBudget * 4;
+  const ranked = rankFiles(perFile);
+  const included = ranked.slice(0, cfg.review.maxReviewFiles);
+  const skippedFiles = ranked.slice(cfg.review.maxReviewFiles).map((f) => f.file);
+  const clippedFiles = [];
+  const chunks = [];
+  for (const f of included) {
+    const numbered = numberPatch(f.patch);
+    if (numbered.length <= budgetChars) {
+      chunks.push({ label: f.file, body: numbered });
+      continue;
+    }
+    const hunks = splitHunks(f.patch).map(numberPatch);
+    let buf = "";
+    let part = 1;
+    const flush = () => {
+      if (buf) {
+        chunks.push({ label: `${f.file} (part ${part})`, body: buf });
+        part++;
+        buf = "";
+      }
+    };
+    for (let h of hunks) {
+      if (h.length > budgetChars) {
+        h = h.slice(0, budgetChars) + "\n\u2026 [hunk clipped: too large to review in full] \u2026";
+        clippedFiles.push(f.file);
+      }
+      if (buf.length + h.length > budgetChars) flush();
+      buf += (buf ? "\n" : "") + h;
+    }
+    flush();
+  }
+  return {
+    chunks,
+    includedFiles: included.map((f) => f.file),
+    skippedFiles,
+    clippedFiles: [...new Set(clippedFiles)]
+  };
 }
 
 // src/core/dismissals.ts
@@ -21687,6 +21992,8 @@ async function runPipeline(opts) {
   const ranTiers = [];
   const skipped = [];
   let findings = [];
+  let budgetHit = false;
+  let built = null;
   const diff = deps.workingDiff(proj2);
   const diffEmpty = !diff.patch;
   if (diffEmpty && !opts.force) {
@@ -21712,6 +22019,7 @@ async function runPipeline(opts) {
       continue;
     }
     if (overBudget()) {
+      budgetHit = true;
       skipped.push({ tier, reason: `time budget (${cfg.budgetSec}s) reached` });
       continue;
     }
@@ -21739,10 +22047,15 @@ async function runPipeline(opts) {
   } else if (!deps.reviewerAvailable()) {
     skipped.push({ tier: "intent", reason: "`claude` CLI not available for the independent reviewer" });
   } else if (overBudget()) {
+    budgetHit = true;
     skipped.push({ tier: "intent", reason: `time budget (${cfg.budgetSec}s) reached before intent review` });
   } else {
     ranTiers.push("intent");
-    const reviewFindings = await deps.reviewIntent({ proj: proj2, intent, patch: diff.patch, truncated: diff.truncated, cfg });
+    built = buildChunks(diff.perFile, cfg);
+    if (built.skippedFiles.length) {
+      skipped.push({ tier: "intent", reason: `${built.skippedFiles.length} file(s) beyond maxReviewFiles not reviewed` });
+    }
+    const reviewFindings = await deps.reviewIntent({ proj: proj2, intent, cfg, chunks: built.chunks });
     findings.push(...reviewFindings);
   }
   if (cfg.tiers.smoke) {
@@ -21753,6 +22066,16 @@ async function runPipeline(opts) {
   const questions = findings.filter((f) => f.kind === "question");
   const notices = findings.filter((f) => f.kind === "info");
   const fixPrompt = blocking.length ? buildFixPrompt(blocking, questions, opts.roundInfo, notices) : "";
+  const coverage = {
+    filesChanged: diff.perFile.length,
+    filesReviewed: built ? built.includedFiles.length : 0,
+    filesSkippedTooLarge: built ? [...built.skippedFiles, ...built.clippedFiles] : [],
+    chunksReviewed: built ? built.chunks.length : 0,
+    packagesScoped: [],
+    testsSelected: null,
+    budgetHit,
+    notes: []
+  };
   return {
     diffEmpty,
     ranTiers,
@@ -21762,24 +22085,25 @@ async function runPipeline(opts) {
     questions,
     notices,
     fixPrompt,
-    summary: summaryLine(blocking, questions, notices)
+    summary: summaryLine(blocking, questions, notices),
+    coverage
   };
 }
 
 // src/core/detect.ts
-var fs3 = __toESM(require("fs"));
-var path3 = __toESM(require("path"));
+var fs5 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
 function readJSONSafe(file) {
   try {
-    return JSON.parse(fs3.readFileSync(file, "utf8"));
+    return JSON.parse(fs5.readFileSync(file, "utf8"));
   } catch {
     return null;
   }
 }
 function detectPackageManager(proj2) {
-  if (fs3.existsSync(path3.join(proj2, "pnpm-lock.yaml"))) return "pnpm";
-  if (fs3.existsSync(path3.join(proj2, "yarn.lock"))) return "yarn";
-  if (fs3.existsSync(path3.join(proj2, "bun.lockb")) || fs3.existsSync(path3.join(proj2, "bun.lock"))) return "bun";
+  if (fs5.existsSync(path5.join(proj2, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs5.existsSync(path5.join(proj2, "yarn.lock"))) return "yarn";
+  if (fs5.existsSync(path5.join(proj2, "bun.lockb")) || fs5.existsSync(path5.join(proj2, "bun.lock"))) return "bun";
   return "npm";
 }
 function runScript(pm, script) {
@@ -21792,8 +22116,8 @@ function detect(proj2) {
   const commands = {};
   const notes = [];
   const ecosystem = [];
-  const pkgPath = path3.join(proj2, "package.json");
-  if (fs3.existsSync(pkgPath)) {
+  const pkgPath = path5.join(proj2, "package.json");
+  if (fs5.existsSync(pkgPath)) {
     ecosystem.push("node");
     const pkg = readJSONSafe(pkgPath) ?? {};
     const scripts = pkg.scripts ?? {};
@@ -21807,7 +22131,7 @@ function detect(proj2) {
       commands.typecheck = { cmd: runScript(pm, "typecheck"), enabled: true };
     } else if (has("tsc")) {
       commands.typecheck = { cmd: runScript(pm, "tsc"), enabled: true };
-    } else if (fs3.existsSync(path3.join(proj2, "tsconfig.json"))) {
+    } else if (fs5.existsSync(path5.join(proj2, "tsconfig.json"))) {
       const tscBin = pm === "npm" ? "npx tsc --noEmit" : pm === "bun" ? "bunx tsc --noEmit" : `${pm} exec tsc --noEmit`;
       commands.typecheck = { cmd: tscBin, enabled: true };
       notes.push("tsconfig.json present \u2192 suggested `tsc --noEmit` for type-checking.");
@@ -21816,12 +22140,12 @@ function detect(proj2) {
     else if (has("start")) commands.start = { cmd: runScript(pm, "start"), enabled: false };
   }
   const pyMarkers = ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "tox.ini"];
-  const isPython = pyMarkers.some((m) => fs3.existsSync(path3.join(proj2, m)));
-  const hasTestsDir = fs3.existsSync(path3.join(proj2, "tests")) || fs3.existsSync(path3.join(proj2, "test"));
+  const isPython = pyMarkers.some((m) => fs5.existsSync(path5.join(proj2, m)));
+  const hasTestsDir = fs5.existsSync(path5.join(proj2, "tests")) || fs5.existsSync(path5.join(proj2, "test"));
   if (isPython || hasTestsDir) {
     ecosystem.push("python");
-    const pyproject = fs3.existsSync(path3.join(proj2, "pyproject.toml")) ? fs3.readFileSync(path3.join(proj2, "pyproject.toml"), "utf8") : "";
-    const reqs = fs3.existsSync(path3.join(proj2, "requirements.txt")) ? fs3.readFileSync(path3.join(proj2, "requirements.txt"), "utf8") : "";
+    const pyproject = fs5.existsSync(path5.join(proj2, "pyproject.toml")) ? fs5.readFileSync(path5.join(proj2, "pyproject.toml"), "utf8") : "";
+    const reqs = fs5.existsSync(path5.join(proj2, "requirements.txt")) ? fs5.readFileSync(path5.join(proj2, "requirements.txt"), "utf8") : "";
     const blob = (pyproject + "\n" + reqs).toLowerCase();
     if (!commands.test && (blob.includes("pytest") || hasTestsDir)) {
       commands.test = { cmd: "pytest -q", enabled: true };
@@ -21831,10 +22155,10 @@ function detect(proj2) {
     else if (!commands.lint && blob.includes("flake8")) commands.lint = { cmd: "flake8", enabled: true };
     if (!commands.typecheck && blob.includes("mypy")) commands.typecheck = { cmd: "mypy .", enabled: true };
   }
-  const makefile = path3.join(proj2, "Makefile");
-  if (fs3.existsSync(makefile)) {
+  const makefile = path5.join(proj2, "Makefile");
+  if (fs5.existsSync(makefile)) {
     ecosystem.push("make");
-    const mk = fs3.readFileSync(makefile, "utf8");
+    const mk = fs5.readFileSync(makefile, "utf8");
     const targets = new Set(
       mk.split("\n").map((l) => l.match(/^([a-zA-Z0-9_-]+):/)?.[1]).filter(Boolean)
     );
@@ -21849,7 +22173,7 @@ function detect(proj2) {
 }
 
 // src/mcp.ts
-var fs4 = __toESM(require("fs"));
+var fs6 = __toESM(require("fs"));
 function proj() {
   return process.env.CLAUDE_PROJECT_DIR || process.env.VOUCH_PROJECT_DIR || process.cwd();
 }
@@ -22041,12 +22365,12 @@ server.tool(
     const marker = offPath(proj());
     if (args.enabled) {
       try {
-        if (exists(marker)) fs4.rmSync(marker);
+        if (exists(marker)) fs6.rmSync(marker);
       } catch {
       }
       return text("Vouch automatic verification RESUMED.");
     }
-    fs4.writeFileSync(marker, `paused ${nowISO()}
+    fs6.writeFileSync(marker, `paused ${nowISO()}
 `);
     return text("Vouch automatic verification PAUSED. Resume with /vouch:off (toggle) or set_enabled(true).");
   }
