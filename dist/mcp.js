@@ -22370,7 +22370,7 @@ function nowISO() {
 function text(s) {
   return { content: [{ type: "text", text: s }] };
 }
-var server = new McpServer({ name: "vouch", version: "0.1.0" });
+var server = new McpServer({ name: "vouch", version: "0.2.0" });
 var cmdSchema = external_exports.object({ cmd: external_exports.string(), enabled: external_exports.boolean() });
 server.tool(
   "record_intent",

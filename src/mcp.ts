@@ -26,7 +26,7 @@ function text(s: string) {
   return { content: [{ type: 'text' as const, text: s }] };
 }
 
-const server = new McpServer({ name: 'vouch', version: '0.1.0' });
+const server = new McpServer({ name: 'vouch', version: '0.2.0' });
 
 const cmdSchema = z.object({ cmd: z.string(), enabled: z.boolean() });
 
