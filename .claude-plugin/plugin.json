@@ -3,6 +3,10 @@
   "version": "0.2.1",
   "description": "Automatic, independent verification for AI coding agents: confirms intent, runs fast-to-slow checks when the agent claims it's done, blocks on hard failures with one prioritized fix-prompt, and remembers what it learned in your repo.",
   "author": {
-    "name": "Vouch"
-  }
+    "name": "Vouch contributors"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/divyanshkoolwal-sketch/vouch",
+  "repository": "https://github.com/divyanshkoolwal-sketch/vouch",
+  "keywords": ["verification", "code-review", "ai-agents", "testing", "hooks", "mcp", "trust"]
 }

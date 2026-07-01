@@ -14,19 +14,24 @@ Vouch is built to be **trusted**: deterministic tool failures are treated as *fa
 
 ## Install
 
-**Local / development (no marketplace):**
-```bash
-claude --plugin-dir /path/to/vouch
-```
+In Claude Code, add this repo as a marketplace and install — **one line, no build step, no API key** (the plugin ships a pre-built `dist/` and the reviewer reuses your existing Claude Code auth):
 
-**Via marketplace:**
-```bash
-# in Claude Code
-/plugin marketplace add /path/to/vouch
+```
+/plugin marketplace add divyanshkoolwal-sketch/vouch
 /plugin install vouch@vouch
 ```
 
-The plugin ships a pre‑built `dist/` — no `npm install` is needed to run it.
+Then start a fresh session. Vouch stays dormant in any repo until you run `/vouch:setup` there.
+
+**Requirements:** Claude Code (v2.1+), Node 18+, and `git` on PATH. Language servers / Semgrep / ctags are used only if already installed (optional).
+
+<details><summary>Local development install</summary>
+
+```bash
+git clone https://github.com/divyanshkoolwal-sketch/vouch && cd vouch
+claude --plugin-dir .        # loads it for this session; /reload-plugins to refresh
+```
+</details>
 
 ## Set up a repo (one step)
 
