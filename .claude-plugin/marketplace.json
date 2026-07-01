@@ -9,7 +9,7 @@
       "name": "vouch",
       "source": "./",
       "description": "Automatic, independent verification for AI coding agents.",
-      "version": "0.3.0"
+      "version": "0.3.1"
     }
   ]
 }

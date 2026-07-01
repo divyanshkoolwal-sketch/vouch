@@ -325,13 +325,27 @@ function runCLI(bin, args, cwd, timeoutSec) {
       }
     }, timeoutSec * 1e3);
     child.stdout?.on("data", (d) => stdout += d.toString());
+    const debug = (code) => {
+      if (!process.env.VOUCH_DEBUG) return;
+      try {
+        require("fs").appendFileSync(
+          "/tmp/vouch-reviewer-debug.log",
+          `
+=== ${bin} ${args.slice(0, 2).join(" ")} | code=${code} timedOut=${timedOut} len=${stdout.length} ===
+${stdout.slice(0, 3e3)}
+`
+        );
+      } catch {
+      }
+    };
     child.on("error", () => {
       clearTimeout(timer);
+      debug(null);
       done(null);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (timedOut) return done(null);
+      debug(code);
       done({ stdout, code, timedOut });
     });
   });
@@ -357,7 +371,7 @@ var claudeBackend = {
     ];
     if (req.model) args.push("--model", req.model);
     const res = await runCLI("claude", args, req.cwd, req.timeoutSec);
-    if (!res) return null;
+    if (!res || res.timedOut) return null;
     try {
       const env = JSON.parse(res.stdout);
       if (typeof env?.result === "string") return { text: env.result, isError: !!env.is_error };
@@ -375,9 +389,9 @@ var codexBackend = {
     const prompt = `${req.systemPrompt}
 
 ${req.userPrompt}`;
-    const args = ["exec", "--sandbox", "read-only", "--ask-for-approval", "never", "--skip-git-repo-check", prompt];
+    const args = ["exec", "--sandbox", "read-only", "--skip-git-repo-check", prompt];
     const res = await runCLI("codex", args, req.cwd, req.timeoutSec);
-    if (!res) return null;
+    if (!res || res.timedOut) return null;
     return { text: res.stdout, isError: res.code !== 0 };
   }
 };
@@ -392,7 +406,7 @@ var cursorBackend = {
 ${req.userPrompt}`;
     const args = ["-p", prompt, "--output-format", "json", "--trust"];
     const res = await runCLI("cursor-agent", args, req.cwd, req.timeoutSec);
-    if (!res) return null;
+    if (!res || res.timedOut) return null;
     try {
       const env = JSON.parse(res.stdout);
       if (typeof env?.result === "string") return { text: env.result, isError: !!env.is_error };
@@ -639,29 +653,18 @@ function groundFindings(findings, readFile) {
       kept.push(f);
       continue;
     }
-    if (!f.evidence || !f.evidence.trim()) {
-      dropped.push({ finding: f, reason: "no verbatim evidence quoted" });
-      continue;
-    }
     if (!f.file) {
       dropped.push({ finding: f, reason: "no file cited" });
       continue;
     }
     const content = readFile(f.file);
     if (content == null) {
-      dropped.push({ finding: f, reason: `cited file not readable: ${f.file}` });
+      dropped.push({ finding: f, reason: `cited file not readable (fabricated): ${f.file}` });
       continue;
     }
-    const needle = normalizeWs(f.evidence);
-    if (needle.length < 3) {
-      dropped.push({ finding: f, reason: "evidence too short to verify" });
-      continue;
-    }
-    if (!normalizeWs(content).includes(needle)) {
-      dropped.push({ finding: f, reason: "quoted evidence not found in cited file (fabricated)" });
-      continue;
-    }
-    kept.push(f);
+    const needle = f.evidence ? normalizeWs(f.evidence) : "";
+    const verbatim = needle.length >= 3 && normalizeWs(content).includes(needle);
+    kept.push({ ...f, evidenceVerbatim: verbatim });
   }
   return { kept, dropped };
 }
@@ -750,7 +753,7 @@ async function verifyFindings(findings, opts) {
     const confirmed = decided === 0 ? false : real > refuted;
     const agreement = decided === 0 ? f.score ?? 0.5 : real / decided;
     if (decided === 0) {
-      kept.push({ ...f, verified: false, score: f.score ?? 0.5 });
+      if (f.evidenceVerbatim) kept.push({ ...f, verified: false, score: f.score ?? 0.5 });
     } else if (confirmed && agreement >= opts.cfg.review.minConfidence) {
       kept.push({ ...f, verified: true, score: agreement });
     }
@@ -779,7 +782,8 @@ async function reviewIntent(opts) {
   const mapped = (await mapLimit(chunks, cfg.review.concurrency, (chunk) => rc({ proj, intent, chunk, cfg }))).flat();
   const reduced = reduceFindings(mapped);
   const grounded = groundFindings(reduced, fileReader(proj)).kept;
-  if (cfg.mode === "fast" || grounded.length === 0) return grounded;
+  if (grounded.length === 0) return grounded;
+  if (cfg.mode === "fast") return grounded.filter((f) => f.evidenceVerbatim);
   return vf(grounded, { proj, intent, cfg });
 }
 
@@ -1472,6 +1476,11 @@ function installCodex(opts, actions) {
   writeTarget(hooksFile, JSON.stringify(hooksObj, null, 2) + "\n", !!opts.dryRun, actions);
   writeTarget(path6.join(dir, "skills", "understand-intent", "SKILL.md"), readFileOr(SKILL_SRC), !!opts.dryRun, actions);
   actions.push({ kind: "note", target: "codex", detail: "MCP tools + hard-block verify loop + intent skill installed (global ~/.codex)." });
+  actions.push({
+    kind: "note",
+    target: "codex",
+    detail: "IMPORTANT: Codex trust-gates hooks \u2014 on your first `codex` session, approve trusting Vouch's hooks when prompted (one time). For automation, pass `--dangerously-bypass-hook-trust`."
+  });
 }
 function uninstallCodex(opts, actions) {
   const dir = codexDir();

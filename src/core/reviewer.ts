@@ -55,7 +55,9 @@ export async function reviewIntent(opts: {
   // GATE — drop any finding whose quoted evidence isn't literally in the code.
   const grounded = groundFindings(reduced, fileReader(proj)).kept;
 
-  // VERIFY — independent CoVe quorum (skipped in fast mode).
-  if (cfg.mode === 'fast' || grounded.length === 0) return grounded;
+  // VERIFY — independent CoVe quorum. Fast mode has no verification, so only
+  // verbatim-grounded findings (the strong deterministic signal) are surfaced.
+  if (grounded.length === 0) return grounded;
+  if (cfg.mode === 'fast') return grounded.filter((f) => f.evidenceVerbatim);
   return vf(grounded, { proj, intent, cfg });
 }

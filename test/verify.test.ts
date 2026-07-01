@@ -12,7 +12,12 @@ const cfg = () => {
   c.review.minConfidence = 0.5;
   return c;
 };
-const f = (title: string): Finding => ({ ...makeFinding({ kind: 'question', tier: 'intent', title, confidence: 'medium', fpExtra: [title] }), evidence: 'x', file: 'a.ts' });
+const f = (title: string, verbatim = true): Finding => ({
+  ...makeFinding({ kind: 'question', tier: 'intent', title, confidence: 'medium', fpExtra: [title] }),
+  evidence: 'x',
+  file: 'a.ts',
+  evidenceVerbatim: verbatim,
+});
 
 describe('CoVe quorum verification', () => {
   it('keeps a finding the majority CONFIRM, marks it verified with agreement score', async () => {
@@ -34,10 +39,12 @@ describe('CoVe quorum verification', () => {
     expect(kept).toHaveLength(0);
   });
 
-  it('keeps as UNVERIFIED when all votes abstain (tool failure never silently drops)', async () => {
-    const kept = await verifyFindings([f('abstain')], { proj: '/x', intent, cfg: cfg(), deps: { askOne: async () => null } });
-    expect(kept).toHaveLength(1);
-    expect(kept[0].verified).toBe(false);
+  it('on all-abstain: keeps a VERBATIM-grounded finding (unverified) but DROPS a prose-only one', async () => {
+    const keptVerbatim = await verifyFindings([f('abstain', true)], { proj: '/x', intent, cfg: cfg(), deps: { askOne: async () => null } });
+    expect(keptVerbatim).toHaveLength(1);
+    expect(keptVerbatim[0].verified).toBe(false);
+    const keptProse = await verifyFindings([f('abstain', false)], { proj: '/x', intent, cfg: cfg(), deps: { askOne: async () => null } });
+    expect(keptProse).toHaveLength(0);
   });
 
   it('runs quorumN votes per finding', async () => {

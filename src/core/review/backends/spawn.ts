@@ -58,13 +58,25 @@ export function runCLI(
     }, timeoutSec * 1000);
 
     child.stdout?.on('data', (d) => (stdout += d.toString()));
+    const debug = (code: number | null) => {
+      if (!process.env.VOUCH_DEBUG) return;
+      try {
+        require('fs').appendFileSync(
+          '/tmp/vouch-reviewer-debug.log',
+          `\n=== ${bin} ${args.slice(0, 2).join(' ')} | code=${code} timedOut=${timedOut} len=${stdout.length} ===\n${stdout.slice(0, 3000)}\n`,
+        );
+      } catch {
+        /* ignore */
+      }
+    };
     child.on('error', () => {
       clearTimeout(timer);
+      debug(null);
       done(null);
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (timedOut) return done(null);
+      debug(code);
       done({ stdout, code, timedOut });
     });
   });

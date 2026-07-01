@@ -12,7 +12,7 @@ export const cursorBackend: Backend = {
     const prompt = `${req.systemPrompt}\n\n${req.userPrompt}`;
     const args = ['-p', prompt, '--output-format', 'json', '--trust'];
     const res = await runCLI('cursor-agent', args, req.cwd, req.timeoutSec);
-    if (!res) return null;
+    if (!res || res.timedOut) return null;
     try {
       const env = JSON.parse(res.stdout);
       if (typeof env?.result === 'string') return { text: env.result, isError: !!env.is_error };

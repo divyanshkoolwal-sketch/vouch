@@ -29,32 +29,25 @@ export function groundFindings(findings: Finding[], readFile: (relPath: string) 
 
   for (const f of findings) {
     if (!isGrounded(f)) {
-      kept.push(f);
+      kept.push(f); // deterministic facts pass through
       continue;
     }
-    if (!f.evidence || !f.evidence.trim()) {
-      dropped.push({ finding: f, reason: 'no verbatim evidence quoted' });
-      continue;
-    }
+    // Deterministic FLOOR: the finding must cite a real file (rejects fabricated
+    // files/locations, backend-agnostic). A verbatim evidence match is a bonus
+    // strong-grounding signal recorded on the finding; when it's absent, the
+    // independent CoVe quorum must confirm the finding before it's surfaced.
     if (!f.file) {
       dropped.push({ finding: f, reason: 'no file cited' });
       continue;
     }
     const content = readFile(f.file);
     if (content == null) {
-      dropped.push({ finding: f, reason: `cited file not readable: ${f.file}` });
+      dropped.push({ finding: f, reason: `cited file not readable (fabricated): ${f.file}` });
       continue;
     }
-    const needle = normalizeWs(f.evidence);
-    if (needle.length < 3) {
-      dropped.push({ finding: f, reason: 'evidence too short to verify' });
-      continue;
-    }
-    if (!normalizeWs(content).includes(needle)) {
-      dropped.push({ finding: f, reason: 'quoted evidence not found in cited file (fabricated)' });
-      continue;
-    }
-    kept.push(f);
+    const needle = f.evidence ? normalizeWs(f.evidence) : '';
+    const verbatim = needle.length >= 3 && normalizeWs(content).includes(needle);
+    kept.push({ ...f, evidenceVerbatim: verbatim });
   }
 
   return { kept, dropped };

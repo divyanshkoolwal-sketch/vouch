@@ -85,7 +85,10 @@ export async function verifyFindings(
     const agreement = decided === 0 ? f.score ?? 0.5 : real / decided;
 
     if (decided === 0) {
-      kept.push({ ...f, verified: false, score: f.score ?? 0.5 });
+      // No CoVe signal (all calls abstained/failed): surface only if the model
+      // already grounded it with a verbatim code quote; otherwise drop (no
+      // grounding + no confirmation).
+      if (f.evidenceVerbatim) kept.push({ ...f, verified: false, score: f.score ?? 0.5 });
     } else if (confirmed && agreement >= opts.cfg.review.minConfidence) {
       kept.push({ ...f, verified: true, score: agreement });
     }

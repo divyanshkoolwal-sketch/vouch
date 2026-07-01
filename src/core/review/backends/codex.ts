@@ -10,9 +10,11 @@ export const codexBackend: Backend = {
   available: () => cliOnPath('codex'),
   async run(req: ReviewerRequest): Promise<ReviewerResult> {
     const prompt = `${req.systemPrompt}\n\n${req.userPrompt}`;
-    const args = ['exec', '--sandbox', 'read-only', '--ask-for-approval', 'never', '--skip-git-repo-check', prompt];
+    // `codex exec` is non-interactive by default (no --ask-for-approval flag in
+    // current builds); the read-only sandbox keeps the reviewer from mutating anything.
+    const args = ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', prompt];
     const res = await runCLI('codex', args, req.cwd, req.timeoutSec);
-    if (!res) return null;
+    if (!res || res.timedOut) return null;
     // stdout is the final assistant message; downstream extractJSON pulls the
     // JSON out even if the build prints extra framing.
     return { text: res.stdout, isError: res.code !== 0 };

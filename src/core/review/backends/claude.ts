@@ -24,7 +24,7 @@ export const claudeBackend: Backend = {
     if (req.model) args.push('--model', req.model);
 
     const res = await runCLI('claude', args, req.cwd, req.timeoutSec);
-    if (!res) return null;
+    if (!res || res.timedOut) return null;
     try {
       const env = JSON.parse(res.stdout);
       if (typeof env?.result === 'string') return { text: env.result, isError: !!env.is_error };

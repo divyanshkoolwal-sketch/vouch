@@ -1,6 +1,6 @@
 {
   "name": "vouch",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Automatic, independent verification for AI coding agents: confirms intent, runs fast-to-slow checks when the agent claims it's done, blocks on hard failures with one prioritized fix-prompt, and remembers what it learned in your repo.",
   "author": {
     "name": "Vouch contributors"

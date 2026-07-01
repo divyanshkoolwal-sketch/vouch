@@ -36,6 +36,10 @@ export interface Finding {
   criterion?: string;
   /** True once an independent (Chain-of-Verification) pass confirmed it. */
   verified?: boolean;
+  /** True if the model's `evidence` quote matched the code verbatim (a strong
+   *  grounding signal). Prose-only evidence (e.g. from some models) is false and
+   *  must instead be confirmed by the independent CoVe quorum to be surfaced. */
+  evidenceVerbatim?: boolean;
   /** Numeric confidence 0..1 (from quorum agreement + the model's own score). */
   score?: number;
 }

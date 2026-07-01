@@ -79,6 +79,8 @@ npx @divyanshkoolwal-sketch/vouch install codex
 
 This registers Vouch's MCP tools + hooks under `~/.codex` (safe, namespaced merge — your existing config is preserved, with a `.bak` backup). You get the **same hard block → fix → re-verify loop** as Claude Code. Then, in a repo, ask Codex to "set up Vouch for this repo" (it uses the vouch tools to detect your test/build commands) or add a `.vouch/config.json`. Remove any time with `npx @divyanshkoolwal-sketch/vouch uninstall codex`.
 
+> **One-time trust step:** Codex trust-gates hooks for security. On your first `codex` session after installing, approve trusting Vouch's hooks when prompted (once). In non-interactive automation, run `codex exec --dangerously-bypass-hook-trust`. Until trusted, the hooks are silently skipped (verification won't run).
+
 ### Cursor
 
 One command, then restart Cursor:

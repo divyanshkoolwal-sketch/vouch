@@ -139,6 +139,11 @@ function installCodex(opts: InstallOpts, actions: Action[]): void {
   writeTarget(path.join(dir, 'skills', 'understand-intent', 'SKILL.md'), readFileOr(SKILL_SRC), !!opts.dryRun, actions);
 
   actions.push({ kind: 'note', target: 'codex', detail: 'MCP tools + hard-block verify loop + intent skill installed (global ~/.codex).' });
+  actions.push({
+    kind: 'note',
+    target: 'codex',
+    detail: 'IMPORTANT: Codex trust-gates hooks — on your first `codex` session, approve trusting Vouch\'s hooks when prompted (one time). For automation, pass `--dangerously-bypass-hook-trust`.',
+  });
 }
 
 function uninstallCodex(opts: InstallOpts, actions: Action[]): void {
