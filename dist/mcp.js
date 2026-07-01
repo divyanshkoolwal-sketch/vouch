@@ -21542,7 +21542,9 @@ function mapChunkFindings(raw, cfg) {
         file: typeof r.file === "string" ? r.file : void 0,
         line: typeof r.startLine === "number" ? r.startLine : void 0,
         confidence: severity === "blocking" ? "high" : "medium",
-        fpExtra: [String(r.criterion ?? ""), String(r.file ?? "")]
+        // Fingerprint on tier+title+file only (NOT criterion): one issue reported
+        // under two criteria must collapse to a single finding.
+        fpExtra: []
       })
     );
     const f = out[out.length - 1];
@@ -22368,7 +22370,7 @@ function nowISO() {
 function text(s) {
   return { content: [{ type: "text", text: s }] };
 }
-var server = new McpServer({ name: "vouch", version: "0.2.0" });
+var server = new McpServer({ name: "vouch", version: "0.2.1" });
 var cmdSchema = external_exports.object({ cmd: external_exports.string(), enabled: external_exports.boolean() });
 server.tool(
   "record_intent",

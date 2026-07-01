@@ -1,6 +1,6 @@
 {
   "name": "vouch",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "An automatic trust/verification layer that plugs into the AI coding agent you already use.",
   "private": true,
   "scripts": {

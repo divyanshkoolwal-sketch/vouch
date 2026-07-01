@@ -76,7 +76,9 @@ export function mapChunkFindings(raw: any, cfg: VouchConfig): Finding[] {
         file: typeof r.file === 'string' ? r.file : undefined,
         line: typeof r.startLine === 'number' ? r.startLine : undefined,
         confidence: severity === 'blocking' ? 'high' : 'medium',
-        fpExtra: [String(r.criterion ?? ''), String(r.file ?? '')],
+        // Fingerprint on tier+title+file only (NOT criterion): one issue reported
+        // under two criteria must collapse to a single finding.
+        fpExtra: [],
       }),
     );
     const f = out[out.length - 1];
