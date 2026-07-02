@@ -9,6 +9,8 @@ import { runTier as defaultRunTier, TierRun } from './runners';
 import { reviewIntent as defaultReviewIntent, reviewerAvailable as defaultReviewerAvailable } from './reviewer';
 import { workingDiff as defaultWorkingDiff, DiffResult } from './diff';
 import { buildChunks, BuildChunksResult } from './review/chunk';
+import { describeBackends } from './review/backends';
+import { checkTestIntegrity } from './testIntegrity';
 import { detectWorkspaces, affectedPackages } from './workspaces';
 import { selectTests } from './tia';
 import { dedupe } from './findings';
@@ -74,6 +76,13 @@ export async function runPipeline(opts: {
   let testsSelected: number | null = null;
   const coverageNotes: string[] = [];
   if (ws.isMonorepo) coverageNotes.push(`monorepo (${ws.tool}); ${scopedPkgs.length} package(s) affected`);
+
+  // ---- Test-integrity tier: deterministic diff analysis (free; catches tests
+  // weakened to force a green run). Runs before Tier 1 — independent of builds.
+  if (cfg.tiers.integrity) {
+    ranTiers.push('integrity');
+    findings.push(...checkTestIntegrity(diff.perFile, cfg));
+  }
 
   // ---- Tier 1: deterministic checks (facts) ----
   let compileBroken = false;
@@ -144,7 +153,19 @@ export async function runPipeline(opts: {
     if (built.skippedFiles.length) {
       skipped.push({ tier: 'intent', reason: `${built.skippedFiles.length} file(s) beyond maxReviewFiles not reviewed` });
     }
-    const reviewFindings = await deps.reviewIntent({ proj, intent, cfg, chunks: built.chunks });
+    const bk = describeBackends(cfg);
+    if (bk.map) {
+      const cross = bk.verify && bk.verify !== bk.map;
+      coverageNotes.push(`reviewer: map=${bk.map}, verify=${bk.verify ?? bk.map}${cross ? ' (cross-model)' : ''}`);
+    }
+    const reviewFindings = await deps.reviewIntent({
+      proj,
+      intent,
+      cfg,
+      chunks: built.chunks,
+      deadlineMs: startedAt + cfg.budgetSec * 1000,
+      onNote: (s) => coverageNotes.push(s),
+    });
     findings.push(...reviewFindings);
   }
 

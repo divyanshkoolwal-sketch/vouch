@@ -99,6 +99,7 @@ function defaultConfig() {
       lint: true,
       build: true,
       test: true,
+      integrity: true,
       intent: true,
       smoke: false
     },
@@ -106,14 +107,23 @@ function defaultConfig() {
       block: true,
       // Only objective, deterministic failures block by default. Lint and the
       // LLM intent review are advisory unless the user opts them in — this is
-      // the core false-positive guardrail.
-      blockOn: ["typecheck", "build", "test"],
+      // the core false-positive guardrail. 'integrity' is deterministic diff
+      // analysis (test-weakening detection); only its high-signal detectors
+      // emit blocking-class findings.
+      blockOn: ["typecheck", "build", "test", "integrity"],
+      blockWhenProven: true,
       maxIterations: 3
     },
     reviewer: {
       model: void 0,
       timeoutSec: 90,
-      backend: "auto"
+      backend: "auto",
+      verifierBackend: "auto"
+    },
+    probe: {
+      enabled: true,
+      timeoutSec: 20,
+      maxPerRun: 5
     },
     // Default to max accuracy (per product decision): full map-reduce + N-vote
     // independent verification. Budget-bounded so a huge repo degrades honestly
@@ -143,6 +153,7 @@ function normalizeConfig(stored) {
     tiers: { ...d.tiers, ...stored.tiers ?? {} },
     enforcement: { ...d.enforcement, ...stored.enforcement ?? {} },
     reviewer: { ...d.reviewer, ...stored.reviewer ?? {} },
+    probe: { ...d.probe, ...stored.probe ?? {} },
     mode: stored.mode ?? d.mode,
     review: { ...d.review, ...stored.review ?? {} },
     tia: { ...d.tia, ...stored.tia ?? {} },
@@ -170,8 +181,8 @@ var import_child_process = require("child_process");
 // src/core/findings.ts
 var import_crypto = require("crypto");
 function fingerprint(parts) {
-  const norm = parts.filter((p) => !!p).map((p) => p.trim().toLowerCase().replace(/\s+/g, " ")).join("");
-  return (0, import_crypto.createHash)("sha1").update(norm).digest("hex").slice(0, 12);
+  const norm2 = parts.filter((p) => !!p).map((p) => p.trim().toLowerCase().replace(/\s+/g, " ")).join("");
+  return (0, import_crypto.createHash)("sha1").update(norm2).digest("hex").slice(0, 12);
 }
 function makeFinding(input) {
   const id = fingerprint([input.tier, input.title, input.file, ...input.fpExtra ?? []]);
@@ -277,8 +288,8 @@ async function runTier(tier, rc, cwd, timeoutMs, blocking) {
 }
 
 // src/core/reviewer.ts
-var fs2 = __toESM(require("fs"));
-var path2 = __toESM(require("path"));
+var fs3 = __toESM(require("fs"));
+var path3 = __toESM(require("path"));
 
 // src/core/review/backends/spawn.ts
 var import_child_process2 = require("child_process");
@@ -504,38 +515,55 @@ var BACKENDS = {
 };
 var AUTO_ORDER = ["claude", "codex", "cursor"];
 var resolveCache = /* @__PURE__ */ new Map();
-function cacheKey(cfg) {
-  return `${cfg.reviewer.backend ?? "auto"}|${process.env.VOUCH_HOST ?? ""}|${cfg.reviewer.apiKeyEnv ?? ""}`;
+function cacheKey(cfg, role) {
+  return `${role}|${cfg.reviewer.backend ?? "auto"}|${cfg.reviewer.verifierBackend ?? "auto"}|${process.env.VOUCH_HOST ?? ""}|${cfg.reviewer.apiKeyEnv ?? ""}`;
 }
-function resolveBackend(cfg, backends = BACKENDS) {
-  const key = cacheKey(cfg);
-  if (resolveCache.has(key)) return resolveCache.get(key);
-  let chosen = null;
+function resolveMap(cfg, backends) {
   const explicit = cfg.reviewer.backend;
   if (explicit && explicit !== "auto") {
     const b = backends[explicit];
-    chosen = b && b.available(cfg) ? b : null;
-  } else {
-    const order = [];
-    const host = process.env.VOUCH_HOST;
-    if (host && backends[host]) order.push(host);
-    for (const n of AUTO_ORDER) if (!order.includes(n)) order.push(n);
-    for (const n of order) {
-      if (backends[n].available(cfg)) {
-        chosen = backends[n];
-        break;
-      }
-    }
-    if (!chosen && backends.api.available(cfg)) chosen = backends.api;
+    return b && b.available(cfg) ? b : null;
   }
+  const order = [];
+  const host = process.env.VOUCH_HOST;
+  if (host && backends[host]) order.push(host);
+  for (const n of AUTO_ORDER) if (!order.includes(n)) order.push(n);
+  for (const n of order) if (backends[n].available(cfg)) return backends[n];
+  if (backends.api.available(cfg)) return backends.api;
+  return null;
+}
+function resolveVerify(cfg, backends) {
+  const explicit = cfg.reviewer.verifierBackend;
+  if (explicit && explicit !== "auto") {
+    const b = backends[explicit];
+    return b && b.available(cfg) ? b : null;
+  }
+  const mapB = resolveMap(cfg, backends);
+  for (const n of AUTO_ORDER) {
+    if (mapB && n === mapB.name) continue;
+    if (backends[n].available(cfg)) return backends[n];
+  }
+  if (mapB?.name !== "api" && backends.api.available(cfg)) return backends.api;
+  return mapB;
+}
+function resolveBackend(cfg, role = "map", backends = BACKENDS) {
+  const key = cacheKey(cfg, role);
+  if (resolveCache.has(key)) return resolveCache.get(key);
+  const chosen = role === "map" ? resolveMap(cfg, backends) : resolveVerify(cfg, backends);
   resolveCache.set(key, chosen);
   return chosen;
 }
 function backendAvailable(cfg, backends) {
-  return resolveBackend(cfg, backends) != null;
+  return resolveBackend(cfg, "map", backends) != null;
 }
-async function runReviewer(req, cfg) {
-  const backend = resolveBackend(cfg);
+function describeBackends(cfg) {
+  return {
+    map: resolveBackend(cfg, "map")?.name ?? null,
+    verify: resolveBackend(cfg, "verify")?.name ?? null
+  };
+}
+async function runReviewer(req, cfg, role = "map") {
+  const backend = resolveBackend(cfg, role);
   if (!backend) return null;
   return backend.run(req, cfg);
 }
@@ -725,7 +753,9 @@ async function askOne(proj, finding, intent, cfg) {
       timeoutSec: cfg.reviewer.timeoutSec,
       maxTurns: 6
     },
-    cfg
+    cfg,
+    "verify"
+    // cross-model when available — independence is the point
   );
   if (!res || res.isError) return null;
   const parsed = extractJSON(res.text);
@@ -761,6 +791,194 @@ async function verifyFindings(findings, opts) {
   return kept;
 }
 
+// src/core/review/probe.ts
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
+var PROBE_MARKER = "VOUCH_PROBE_VIOLATION";
+var MARKER_LINE = new RegExp(`^${PROBE_MARKER}:`, "m");
+var NODE_FORBIDDEN = [
+  /child_process/,
+  /\bexec(Sync)?\s*\(/,
+  /\bspawn(Sync)?\s*\(/,
+  /fs\.(write|append|rm|unlink|mkdir|rename|cp|chmod|truncate|createWriteStream)/,
+  /require\(\s*['"](http|https|net|tls|dgram|dns|worker_threads)['"]\s*\)/,
+  /\bfetch\s*\(/,
+  /XMLHttpRequest|WebSocket/
+];
+var PY_FORBIDDEN = [
+  /\bsubprocess\b/,
+  /os\.(system|popen|remove|rmdir|unlink|rename)/,
+  /shutil\./,
+  /\bopen\s*\([^)]*['"][wax]/,
+  /\brequests\b/,
+  /urllib/,
+  /\bsocket\b/
+];
+function screenProbe(code, language) {
+  if (!code || !code.trim()) return "empty probe";
+  if (code.length > 4e3) return "probe too large";
+  if (!code.includes(PROBE_MARKER)) return "probe missing the violation marker";
+  const rules = language === "node" ? NODE_FORBIDDEN : PY_FORBIDDEN;
+  for (const re of rules) {
+    if (re.test(code)) return `probe uses a forbidden API (${re.source.slice(0, 40)})`;
+  }
+  return null;
+}
+function probeEligible(f) {
+  const file = f.file ?? "";
+  if (/\.[cm]?js$/.test(file)) return "node";
+  if (/\.py$/.test(file)) return "python";
+  return null;
+}
+var GEN_SYSTEM = [
+  "You write a PROBE: a tiny standalone script that checks ONE suspected problem in a repo.",
+  "Contract (strict):",
+  "- The probe will run with CWD = the repo root.",
+  "- Node probes are CommonJS. Load the target module with: const m = require(require('path').join(process.cwd(), '<relative path from repo root>'));",
+  "- Python probes: import sys, os; sys.path.insert(0, os.getcwd()); then import the module.",
+  `- Check ONLY the stated criterion. If it is VIOLATED by the current code: print "${PROBE_MARKER}: <one-line reason>" and exit with code 1. If it is satisfied: print "ok" and exit 0.`,
+  "- Standard library only. No file writes, no network, no subprocesses, no external packages.",
+  "- Keep it under 40 lines.",
+  'Output a SINGLE JSON object and nothing else: {"language":"node"|"python","code":"<full script>"}',
+  'If a reliable probe is not possible (e.g. the target cannot be imported directly), output {"language":"none"}.'
+].join("\n");
+function genPrompt(f, intent) {
+  return [
+    `# INTENT
+${intent.summary}`,
+    f.criterion ? `
+# CRITERION TO PROBE
+${f.criterion}` : "\n# CRITERION TO PROBE\n(general intent above)",
+    `
+# SUSPECTED PROBLEM
+${f.title}
+${f.detail ?? ""}`,
+    `
+# TARGET MODULE
+${f.file ?? "(unknown)"}`,
+    f.evidence ? `
+# CODE THE REVIEWER QUOTED
+\`\`\`
+${f.evidence}
+\`\`\`` : "",
+    "\nWrite the probe now. Return the JSON object only."
+  ].filter(Boolean).join("\n");
+}
+function probesDirFor(proj) {
+  return path2.join(runsDir(proj), "probes");
+}
+async function executeProbe(proj, id, language, code, timeoutSec) {
+  const dir = probesDirFor(proj);
+  fs2.mkdirSync(dir, { recursive: true });
+  const ext = language === "python" ? "py" : "cjs";
+  const abs = path2.join(dir, `${id}.${ext}`);
+  fs2.writeFileSync(abs, code);
+  const rel = path2.relative(proj, abs);
+  const command = language === "python" ? `python3 "${rel}"` : `node "${rel}"`;
+  const r = await runCommand(command, proj, timeoutSec * 1e3);
+  const violated = r.code !== null && r.code !== 0 && MARKER_LINE.test(r.output);
+  const outcome = violated ? "proven" : r.code === 0 ? "not-reproduced" : "inconclusive";
+  return { path: rel, command, language, outcome, outputTail: r.output.slice(-400) };
+}
+async function defaultGenerate(f, intent, cfg, proj) {
+  const res = await runReviewer(
+    {
+      cwd: proj,
+      systemPrompt: GEN_SYSTEM,
+      userPrompt: genPrompt(f, intent),
+      model: cfg.reviewer.model,
+      timeoutSec: cfg.reviewer.timeoutSec,
+      maxTurns: 6
+    },
+    cfg,
+    "verify"
+  );
+  if (!res || res.isError) return null;
+  return extractJSON(res.text);
+}
+async function runProbes(findings, opts) {
+  const { proj, intent, cfg } = opts;
+  const gen = opts.deps?.generate ?? defaultGenerate;
+  const out = [...findings];
+  const candidates = findings.map((f, i) => ({ f, i })).filter(({ f }) => f.tier === "intent" && probeEligible(f));
+  const ineligible = findings.filter((f) => f.tier === "intent" && !probeEligible(f)).length;
+  if (ineligible) opts.onNote?.(`probes: ${ineligible} finding(s) skipped (module not directly runnable, e.g. TypeScript)`);
+  const capped = candidates.slice(0, cfg.probe.maxPerRun);
+  if (candidates.length > capped.length) opts.onNote?.(`probes: capped at ${cfg.probe.maxPerRun} (of ${candidates.length})`);
+  await mapLimit(capped, cfg.review.concurrency, async ({ f, i }) => {
+    if (opts.deadlineMs && Date.now() + cfg.probe.timeoutSec * 1e3 > opts.deadlineMs) {
+      opts.onNote?.("probes: skipped (time budget reached)");
+      return;
+    }
+    const g = await gen(f, intent, cfg, proj);
+    const language = g?.language === "node" || g?.language === "python" ? g.language : null;
+    if (!language || typeof g?.code !== "string") return;
+    if (probeEligible(f) !== language) return;
+    const reason = screenProbe(g.code, language);
+    if (reason) {
+      opts.onNote?.(`probe for "${f.title}" not executed: ${reason}`);
+      return;
+    }
+    const info = await executeProbe(proj, f.id, language, g.code, cfg.probe.timeoutSec);
+    if (info.outcome === "proven") {
+      const block = cfg.enforcement.block && cfg.enforcement.blockWhenProven;
+      out[i] = {
+        ...f,
+        kind: block ? "blocking" : f.kind,
+        confidence: "fact",
+        verified: true,
+        provenBy: "probe",
+        command: info.command,
+        probe: info,
+        detail: [f.detail ?? "", `Probe demonstrated the violation \u2014 reproduce with: ${info.command}
+${(info.outputTail ?? "").trim()}`].filter(Boolean).join("\n")
+      };
+    } else if (info.outcome === "not-reproduced") {
+      out[i] = {
+        ...f,
+        score: (f.score ?? 0.5) * 0.5,
+        probe: info,
+        detail: [f.detail ?? "", "Note: an automated probe could NOT reproduce this \u2014 verify before treating it as a bug."].filter(Boolean).join("\n")
+      };
+    } else {
+      out[i] = { ...f, probe: info };
+    }
+  });
+  return out;
+}
+async function rerunStoredProbes(stored, proj, timeoutSec) {
+  const stillFailing = [];
+  const clearedIds = [];
+  for (const rec of stored) {
+    const m = rec.command.match(/"([^"]+)"/);
+    const rel = m ? m[1] : null;
+    if (!rel || !fs2.existsSync(path2.join(proj, rel))) {
+      clearedIds.push(rec.id);
+      continue;
+    }
+    const r = await runCommand(rec.command, proj, timeoutSec * 1e3);
+    if (r.code !== null && r.code !== 0 && MARKER_LINE.test(r.output)) {
+      stillFailing.push({
+        id: rec.id,
+        kind: "blocking",
+        tier: "intent",
+        title: rec.title,
+        detail: `Probe still failing \u2014 reproduce with: ${rec.command}
+${r.output.slice(-400).trim()}`,
+        file: rec.file,
+        command: rec.command,
+        confidence: "fact",
+        criterion: rec.criterion,
+        verified: true,
+        provenBy: "probe"
+      });
+    } else {
+      clearedIds.push(rec.id);
+    }
+  }
+  return { stillFailing, clearedIds };
+}
+
 // src/core/reviewer.ts
 function reviewerAvailable(cfg) {
   return backendAvailable(cfg);
@@ -768,7 +986,7 @@ function reviewerAvailable(cfg) {
 function fileReader(proj) {
   return (rel) => {
     try {
-      return fs2.readFileSync(path2.join(proj, rel), "utf8");
+      return fs3.readFileSync(path3.join(proj, rel), "utf8");
     } catch {
       return null;
     }
@@ -779,19 +997,24 @@ async function reviewIntent(opts) {
   if (!chunks.length) return [];
   const rc = opts.deps?.reviewChunk ?? reviewChunk;
   const vf = opts.deps?.verifyFindings ?? verifyFindings;
+  const rp = opts.deps?.runProbes ?? runProbes;
   const mapped = (await mapLimit(chunks, cfg.review.concurrency, (chunk) => rc({ proj, intent, chunk, cfg }))).flat();
   const reduced = reduceFindings(mapped);
   const grounded = groundFindings(reduced, fileReader(proj)).kept;
   if (grounded.length === 0) return grounded;
   if (cfg.mode === "fast") return grounded.filter((f) => f.evidenceVerbatim);
-  return vf(grounded, { proj, intent, cfg });
+  let verified = await vf(grounded, { proj, intent, cfg });
+  if (cfg.probe.enabled && verified.length) {
+    verified = await rp(verified, { proj, intent, cfg, deadlineMs: opts.deadlineMs, onNote: opts.onNote });
+  }
+  return verified;
 }
 
 // src/core/diff.ts
 var import_child_process3 = require("child_process");
 var import_crypto2 = require("crypto");
-var fs3 = __toESM(require("fs"));
-var path3 = __toESM(require("path"));
+var fs4 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
 var EXCLUDE_VOUCH = ":(exclude).vouch";
 var MAX_UNTRACKED_FILE_LINES = 800;
 function git(proj, args) {
@@ -866,10 +1089,10 @@ function workingDiff(proj, baseOverride) {
   for (const f of untracked) {
     fileSet.add(f);
     try {
-      const full = path3.join(proj, f);
-      const st = fs3.statSync(full);
+      const full = path4.join(proj, f);
+      const st = fs4.statSync(full);
       if (st.isDirectory() || st.size > 512 * 1024) continue;
-      const lines = fs3.readFileSync(full, "utf8").split("\n").slice(0, MAX_UNTRACKED_FILE_LINES);
+      const lines = fs4.readFileSync(full, "utf8").split("\n").slice(0, MAX_UNTRACKED_FILE_LINES);
       const body = lines.map((l, i) => `${i + 1}: +${l}`).join("\n");
       perFile.push({ file: f, patch: `=== new file: ${f} ===
 ${body}`, addedLines: lines.length });
@@ -960,48 +1183,209 @@ function buildChunks(perFile, cfg) {
   };
 }
 
+// src/core/testIntegrity.ts
+function isTestFile(f) {
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(f)) return true;
+  if (/(^|\/)__tests__\//.test(f)) return true;
+  if (/(^|\/)test_[^/]+\.py$/.test(f) || /_test\.(py|go)$/.test(f)) return true;
+  if (/(^|\/)tests?\//.test(f) && /\.(py|go|rb|[cm]?[jt]sx?)$/.test(f)) return true;
+  return false;
+}
+var norm = (s) => s.replace(/\s+/g, " ").trim();
+function changedLines(patch) {
+  const added = [];
+  const removed = [];
+  for (let line of patch.split("\n")) {
+    line = line.replace(/^\d+: /, "");
+    if (line.startsWith("+") && !line.startsWith("+++")) added.push(line.slice(1));
+    else if (line.startsWith("-") && !line.startsWith("---")) removed.push(line.slice(1));
+  }
+  return { added, removed };
+}
+function cancelMoves(added, removed) {
+  const count = (lines) => {
+    const m = /* @__PURE__ */ new Map();
+    for (const l of lines) {
+      const k = norm(l);
+      m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+  };
+  const a = count(added);
+  const netRemoved = removed.filter((l) => {
+    const k = norm(l);
+    const c = a.get(k) ?? 0;
+    if (c > 0) {
+      a.set(k, c - 1);
+      return false;
+    }
+    return true;
+  });
+  const r = count(removed);
+  const netAdded = added.filter((l) => {
+    const k = norm(l);
+    const c = r.get(k) ?? 0;
+    if (c > 0) {
+      r.set(k, c - 1);
+      return false;
+    }
+    return true;
+  });
+  return { netAdded, netRemoved };
+}
+var FOCUS_SKIP = /(\.(only|skip)\s*\()|(\bx(it|describe|test)\s*\()|(@pytest\.mark\.skip)|(\bunittest\.skip)|(\bt\.Skip\s*\()/;
+var ASSERTION = /(\bexpect\s*\()|(\bassert\b)|(\.should\b)|(\bassert[A-Z]\w*\s*\()/;
+var TEST_DECL = /(\b(it|test)\s*\(\s*['"`])|(\bdef\s+test_)/;
+var STRICT_MATCHER = /\.(toBe|toEqual|toStrictEqual)\s*\(/;
+var VACUOUS_MATCHER = /\.(toBeTruthy|toBeDefined|toBeFalsy)\s*\(|\.not\.toThrow\s*\(/;
+function expectSubject(line) {
+  const m = line.match(/expect\s*\((.*?)\)\s*\./);
+  return m ? norm(m[1]) : null;
+}
+function toBeArg(line) {
+  const m = line.match(/expect\s*\((.*?)\)\s*\.(?:toBe|toEqual|toStrictEqual)\s*\((.*?)\)/);
+  return m ? { subject: norm(m[1]), arg: norm(m[2]) } : null;
+}
+var sample = (lines, n = 3) => lines.slice(0, n).map((l) => `  ${l.trim()}`).join("\n");
+function checkTestIntegrity(perFile, cfg) {
+  const findings = [];
+  const prodChanged = perFile.some((f) => !isTestFile(f.file));
+  const canBlock = cfg.enforcement.block && cfg.enforcement.blockOn.includes("integrity");
+  for (const fd of perFile) {
+    if (!isTestFile(fd.file)) continue;
+    const { added, removed } = changedLines(fd.patch);
+    const { netAdded, netRemoved } = cancelMoves(added, removed);
+    const skips = netAdded.filter((l) => FOCUS_SKIP.test(l));
+    if (skips.length) {
+      findings.push(
+        makeFinding({
+          kind: canBlock ? "blocking" : "info",
+          tier: "integrity",
+          title: "test focus/skip marker added",
+          file: fd.file,
+          confidence: "fact",
+          detail: `This change adds ${skips.length} focus/skip marker(s) \u2014 .only/.skip silently disables tests:
+${sample(skips)}
+Remove them (or dismiss if genuinely intended).`,
+          fpExtra: ["focus-skip"]
+        })
+      );
+    }
+    const strictSubjects = new Set(netRemoved.filter((l) => STRICT_MATCHER.test(l)).map(expectSubject).filter(Boolean));
+    const loosened = netAdded.filter((l) => {
+      if (!VACUOUS_MATCHER.test(l)) return false;
+      const s = expectSubject(l);
+      return !!s && strictSubjects.has(s);
+    });
+    if (loosened.length) {
+      findings.push(
+        makeFinding({
+          kind: canBlock ? "blocking" : "info",
+          tier: "integrity",
+          title: "test assertion loosened (strict matcher \u2192 vacuous)",
+          file: fd.file,
+          confidence: "fact",
+          detail: `A strict assertion was replaced with one that can barely fail:
+${sample(loosened)}
+Restore a strict assertion on the real expected value.`,
+          fpExtra: ["loosened-matcher"]
+        })
+      );
+    }
+    const removedAsserts = netRemoved.filter((l) => ASSERTION.test(l)).length;
+    const addedAsserts = netAdded.filter((l) => ASSERTION.test(l)).length;
+    const netLoss = removedAsserts - addedAsserts;
+    if (prodChanged && netLoss >= 2) {
+      findings.push(
+        makeFinding({
+          kind: "info",
+          tier: "integrity",
+          title: "assertions removed alongside production changes",
+          file: fd.file,
+          confidence: "fact",
+          detail: `${netLoss} more assertion(s) removed than added in this test file, in the same change that modifies production code. Make sure coverage wasn't weakened to get tests passing.`,
+          fpExtra: ["assertion-loss"]
+        })
+      );
+    }
+    const deletedTests = netRemoved.filter((l) => TEST_DECL.test(l)).length;
+    const addedTests = netAdded.filter((l) => TEST_DECL.test(l)).length;
+    if (prodChanged && deletedTests > addedTests) {
+      findings.push(
+        makeFinding({
+          kind: "info",
+          tier: "integrity",
+          title: "test case(s) deleted alongside production changes",
+          file: fd.file,
+          confidence: "fact",
+          detail: `${deletedTests - addedTests} test case(s) removed in the same change that modifies production code. Confirm the deletion was requested, not a shortcut to green.`,
+          fpExtra: ["test-deleted"]
+        })
+      );
+    }
+    if (prodChanged) {
+      const before = new Map(netRemoved.map(toBeArg).filter(Boolean).map((x) => [x.subject, x.arg]));
+      const drifted = netAdded.map(toBeArg).filter((x) => !!x).filter((x) => before.has(x.subject) && before.get(x.subject) !== x.arg);
+      if (drifted.length) {
+        findings.push(
+          makeFinding({
+            kind: "question",
+            tier: "integrity",
+            title: "expected test values changed to match new behavior",
+            file: fd.file,
+            confidence: "fact",
+            detail: `${drifted.length} assertion(s) had their expected value changed in the same diff that changes the code under test (e.g. ${drifted[0].subject}: ${before.get(drifted[0].subject)} \u2192 ${drifted[0].arg}). Confirm the NEW values are what the user actually wants \u2014 not the code's new (possibly wrong) output.`,
+            fpExtra: ["expectation-drift"]
+          })
+        );
+      }
+    }
+  }
+  return findings;
+}
+
 // src/core/workspaces.ts
-var fs4 = __toESM(require("fs"));
-var path4 = __toESM(require("path"));
+var fs5 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
 function readJSON2(file) {
   try {
-    return JSON.parse(fs4.readFileSync(file, "utf8"));
+    return JSON.parse(fs5.readFileSync(file, "utf8"));
   } catch {
     return null;
   }
 }
 function detectPackageManager(proj) {
-  if (fs4.existsSync(path4.join(proj, "pnpm-lock.yaml"))) return "pnpm";
-  if (fs4.existsSync(path4.join(proj, "yarn.lock"))) return "yarn";
-  if (fs4.existsSync(path4.join(proj, "bun.lockb")) || fs4.existsSync(path4.join(proj, "bun.lock"))) return "bun";
+  if (fs5.existsSync(path5.join(proj, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs5.existsSync(path5.join(proj, "yarn.lock"))) return "yarn";
+  if (fs5.existsSync(path5.join(proj, "bun.lockb")) || fs5.existsSync(path5.join(proj, "bun.lock"))) return "bun";
   return "npm";
 }
 function expandGlob(proj, pattern) {
   const clean = pattern.replace(/\/\*\*$/, "/*");
   if (clean.endsWith("/*")) {
     const base = clean.slice(0, -2);
-    const baseDir = path4.join(proj, base);
+    const baseDir = path5.join(proj, base);
     try {
-      return fs4.readdirSync(baseDir, { withFileTypes: true }).filter((d) => d.isDirectory() && fs4.existsSync(path4.join(baseDir, d.name, "package.json"))).map((d) => path4.join(base, d.name));
+      return fs5.readdirSync(baseDir, { withFileTypes: true }).filter((d) => d.isDirectory() && fs5.existsSync(path5.join(baseDir, d.name, "package.json"))).map((d) => path5.join(base, d.name));
     } catch {
       return [];
     }
   }
-  return fs4.existsSync(path4.join(proj, clean, "package.json")) ? [clean] : [];
+  return fs5.existsSync(path5.join(proj, clean, "package.json")) ? [clean] : [];
 }
 function pkgFromDir(proj, dir) {
-  const pj = readJSON2(path4.join(proj, dir, "package.json"));
-  return { name: pj?.name || path4.basename(dir) || "root", dir };
+  const pj = readJSON2(path5.join(proj, dir, "package.json"));
+  return { name: pj?.name || path5.basename(dir) || "root", dir };
 }
 function detectWorkspaces(proj) {
   const pm = detectPackageManager(proj);
-  const rootPkg = readJSON2(path4.join(proj, "package.json"));
+  const rootPkg = readJSON2(path5.join(proj, "package.json"));
   let patterns = [];
   let tool = "none";
-  const pnpmWs = path4.join(proj, "pnpm-workspace.yaml");
-  if (fs4.existsSync(pnpmWs)) {
+  const pnpmWs = path5.join(proj, "pnpm-workspace.yaml");
+  if (fs5.existsSync(pnpmWs)) {
     tool = "pnpm";
-    const txt = fs4.readFileSync(pnpmWs, "utf8");
+    const txt = fs5.readFileSync(pnpmWs, "utf8");
     let inPkgs = false;
     for (const line of txt.split("\n")) {
       if (/^packages:/.test(line)) {
@@ -1022,30 +1406,30 @@ function detectWorkspaces(proj) {
       tool = pm;
     }
   }
-  if (fs4.existsSync(path4.join(proj, "nx.json"))) tool = "nx";
-  else if (fs4.existsSync(path4.join(proj, "turbo.json"))) tool = "turbo";
-  else if (fs4.existsSync(path4.join(proj, "lerna.json")) && tool === "none") tool = "lerna";
+  if (fs5.existsSync(path5.join(proj, "nx.json"))) tool = "nx";
+  else if (fs5.existsSync(path5.join(proj, "turbo.json"))) tool = "turbo";
+  else if (fs5.existsSync(path5.join(proj, "lerna.json")) && tool === "none") tool = "lerna";
   const dirs = /* @__PURE__ */ new Set();
   for (const p of patterns) for (const d of expandGlob(proj, p)) dirs.add(d);
   if (!dirs.size) {
     const cargo = readCargoWorkspace(proj);
     if (cargo.length) return { isMonorepo: true, tool: "cargo", packageManager: pm, packages: cargo };
-    if (fs4.existsSync(path4.join(proj, "go.work"))) return { isMonorepo: true, tool: "go", packageManager: pm, packages: [] };
+    if (fs5.existsSync(path5.join(proj, "go.work"))) return { isMonorepo: true, tool: "go", packageManager: pm, packages: [] };
   }
   const packages = [...dirs].sort().map((d) => pkgFromDir(proj, d));
   return { isMonorepo: packages.length > 0, tool: packages.length ? tool : "none", packageManager: pm, packages };
 }
 function readCargoWorkspace(proj) {
-  const cargo = path4.join(proj, "Cargo.toml");
-  if (!fs4.existsSync(cargo)) return [];
-  const txt = fs4.readFileSync(cargo, "utf8");
+  const cargo = path5.join(proj, "Cargo.toml");
+  if (!fs5.existsSync(cargo)) return [];
+  const txt = fs5.readFileSync(cargo, "utf8");
   if (!/\[workspace\]/.test(txt)) return [];
   const m = txt.match(/members\s*=\s*\[([^\]]*)\]/);
   if (!m) return [];
   const members = [...m[1].matchAll(/["']([^"']+)["']/g)].map((x) => x[1]);
   const dirs = /* @__PURE__ */ new Set();
   for (const p of members) for (const d of expandGlob(proj, p)) dirs.add(d);
-  return [...dirs].map((d) => ({ name: path4.basename(d), dir: d }));
+  return [...dirs].map((d) => ({ name: path5.basename(d), dir: d }));
 }
 function affectedPackages(changedFiles, packages) {
   const byDirLen = [...packages].sort((a, b) => b.dir.length - a.dir.length);
@@ -1062,8 +1446,8 @@ function affectedPackages(changedFiles, packages) {
 }
 
 // src/core/tia.ts
-var fs5 = __toESM(require("fs"));
-var path5 = __toESM(require("path"));
+var fs6 = __toESM(require("fs"));
+var path6 = __toESM(require("path"));
 var ROOT_PATTERNS = [
   /(^|\/)package\.json$/,
   /(^|\/)[^/]*lock[^/]*$/i,
@@ -1089,7 +1473,7 @@ function selectTests(opts) {
   let effectiveRunner = runner;
   if (!effectiveRunner && viaScript(testCmd)) {
     try {
-      const pj = JSON.parse(fs5.readFileSync(path5.join(proj, "package.json"), "utf8"));
+      const pj = JSON.parse(fs6.readFileSync(path6.join(proj, "package.json"), "utf8"));
       effectiveRunner = detectRunner(String(pj?.scripts?.test ?? ""));
     } catch {
     }
@@ -1098,7 +1482,7 @@ function selectTests(opts) {
   if (changedFiles.some((f) => ROOT_PATTERNS.some((re) => re.test(f)))) {
     return full("a root/config file changed \u2192 full suite");
   }
-  const sources = changedFiles.filter((f) => CODE_RE.test(f) && fs5.existsSync(path5.join(proj, f)));
+  const sources = changedFiles.filter((f) => CODE_RE.test(f) && fs6.existsSync(path6.join(proj, f)));
   if (sources.length === 0) return full("no changed source files to target \u2192 full suite");
   const fileArgs = sources.map((f) => JSON.stringify(f)).join(" ");
   const pass = viaScript(testCmd) ? " --" : "";
@@ -1137,6 +1521,7 @@ function coverageLine(cov) {
   if (cov.packagesScoped.length) bits.push(`packages: ${cov.packagesScoped.join(", ")}`);
   if (cov.testsSelected != null) bits.push(`${cov.testsSelected} changed file(s) targeted for tests`);
   if (cov.budgetHit) bits.push("time budget reached \u2014 coverage partial");
+  for (const n of cov.notes ?? []) bits.push(n);
   return bits.length ? `coverage: ${bits.join("; ")}` : "";
 }
 function clip(s, n) {
@@ -1228,6 +1613,10 @@ async function runPipeline(opts) {
   let testsSelected = null;
   const coverageNotes = [];
   if (ws.isMonorepo) coverageNotes.push(`monorepo (${ws.tool}); ${scopedPkgs.length} package(s) affected`);
+  if (cfg.tiers.integrity) {
+    ranTiers.push("integrity");
+    findings.push(...checkTestIntegrity(diff.perFile, cfg));
+  }
   let compileBroken = false;
   for (const tier of TIER_ORDER) {
     let rc = cfg.commands[tier];
@@ -1284,7 +1673,19 @@ async function runPipeline(opts) {
     if (built.skippedFiles.length) {
       skipped.push({ tier: "intent", reason: `${built.skippedFiles.length} file(s) beyond maxReviewFiles not reviewed` });
     }
-    const reviewFindings = await deps.reviewIntent({ proj, intent, cfg, chunks: built.chunks });
+    const bk = describeBackends(cfg);
+    if (bk.map) {
+      const cross = bk.verify && bk.verify !== bk.map;
+      coverageNotes.push(`reviewer: map=${bk.map}, verify=${bk.verify ?? bk.map}${cross ? " (cross-model)" : ""}`);
+    }
+    const reviewFindings = await deps.reviewIntent({
+      proj,
+      intent,
+      cfg,
+      chunks: built.chunks,
+      deadlineMs: startedAt + cfg.budgetSec * 1e3,
+      onNote: (s) => coverageNotes.push(s)
+    });
     findings.push(...reviewFindings);
   }
   if (cfg.tiers.smoke) {
@@ -1320,35 +1721,35 @@ async function runPipeline(opts) {
 }
 
 // src/core/runState.ts
-var fs6 = __toESM(require("fs"));
+var fs7 = __toESM(require("fs"));
 function loadState(proj) {
   return readJSON(statePath(proj), { lastDiffHash: null, iteration: 0 });
 }
 function saveState(proj, state) {
-  fs6.mkdirSync(runsDir(proj), { recursive: true });
+  fs7.mkdirSync(runsDir(proj), { recursive: true });
   writeJSON(statePath(proj), state);
 }
 function isDirty(proj) {
   try {
-    return fs6.existsSync(dirtyPath(proj)) && fs6.statSync(dirtyPath(proj)).size > 0;
+    return fs7.existsSync(dirtyPath(proj)) && fs7.statSync(dirtyPath(proj)).size > 0;
   } catch {
     return false;
   }
 }
 function clearDirty(proj) {
   try {
-    if (fs6.existsSync(dirtyPath(proj))) fs6.rmSync(dirtyPath(proj));
+    if (fs7.existsSync(dirtyPath(proj))) fs7.rmSync(dirtyPath(proj));
   } catch {
   }
 }
 function markDirty(proj) {
-  fs6.mkdirSync(runsDir(proj), { recursive: true });
-  fs6.appendFileSync(dirtyPath(proj), `${Date.now()}
+  fs7.mkdirSync(runsDir(proj), { recursive: true });
+  fs7.appendFileSync(dirtyPath(proj), `${Date.now()}
 `);
 }
 
 // src/cli.ts
-var path7 = __toESM(require("path"));
+var path8 = __toESM(require("path"));
 
 // src/core/hostOutput.ts
 function claudeStopOutput(d) {
@@ -1374,26 +1775,26 @@ ${fixPrompt}`
 }
 
 // src/install.ts
-var fs7 = __toESM(require("fs"));
+var fs8 = __toESM(require("fs"));
 var os = __toESM(require("os"));
-var path6 = __toESM(require("path"));
-var PKG_ROOT = path6.resolve(__dirname, "..");
-var DIST = path6.join(PKG_ROOT, "dist");
-var SCRIPTS = path6.join(PKG_ROOT, "scripts");
-var SKILL_SRC = path6.join(PKG_ROOT, "skills", "understand-intent", "SKILL.md");
+var path7 = __toESM(require("path"));
+var PKG_ROOT = path7.resolve(__dirname, "..");
+var DIST = path7.join(PKG_ROOT, "dist");
+var SCRIPTS = path7.join(PKG_ROOT, "scripts");
+var SKILL_SRC = path7.join(PKG_ROOT, "skills", "understand-intent", "SKILL.md");
 function q(s) {
   return `"${s}"`;
 }
 function readFileOr(file, fallback = "") {
   try {
-    return fs7.readFileSync(file, "utf8");
+    return fs8.readFileSync(file, "utf8");
   } catch {
     return fallback;
   }
 }
 function writeTarget(file, content, dry, actions) {
-  const exists2 = fs7.existsSync(file);
-  if (exists2 && fs7.readFileSync(file, "utf8") === content) {
+  const exists2 = fs8.existsSync(file);
+  if (exists2 && fs8.readFileSync(file, "utf8") === content) {
     actions.push({ kind: "skip", target: file, detail: "already up to date" });
     return;
   }
@@ -1401,17 +1802,17 @@ function writeTarget(file, content, dry, actions) {
     actions.push({ kind: "write", target: file, detail: exists2 ? "would update" : "would create" });
     return;
   }
-  fs7.mkdirSync(path6.dirname(file), { recursive: true });
+  fs8.mkdirSync(path7.dirname(file), { recursive: true });
   if (exists2) {
-    fs7.copyFileSync(file, file + ".bak");
+    fs8.copyFileSync(file, file + ".bak");
     actions.push({ kind: "backup", target: file + ".bak" });
   }
-  fs7.writeFileSync(file, content);
+  fs8.writeFileSync(file, content);
   actions.push({ kind: "write", target: file, detail: exists2 ? "updated" : "created" });
 }
 function readJSONObj(file) {
   try {
-    return JSON.parse(fs7.readFileSync(file, "utf8"));
+    return JSON.parse(fs8.readFileSync(file, "utf8"));
   } catch {
     return {};
   }
@@ -1457,24 +1858,24 @@ function removeTomlSection(content) {
   return out.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 function mcpServerJSON(host) {
-  return { command: "node", args: [path6.join(DIST, "mcp.js")], env: { VOUCH_HOST: host } };
+  return { command: "node", args: [path7.join(DIST, "mcp.js")], env: { VOUCH_HOST: host } };
 }
 function codexDir() {
-  return path6.join(os.homedir(), ".codex");
+  return path7.join(os.homedir(), ".codex");
 }
 function installCodex(opts, actions) {
   const dir = codexDir();
-  const cfgToml = path6.join(dir, "config.toml");
-  const body = ['command = "node"', `args = [${q(path6.join(DIST, "mcp.js"))}]`, 'env = { VOUCH_HOST = "codex" }', ""].join("\n");
+  const cfgToml = path7.join(dir, "config.toml");
+  const body = ['command = "node"', `args = [${q(path7.join(DIST, "mcp.js"))}]`, 'env = { VOUCH_HOST = "codex" }', ""].join("\n");
   writeTarget(cfgToml, upsertTomlSection(readFileOr(cfgToml), body), !!opts.dryRun, actions);
-  const hooksFile = path6.join(dir, "hooks.json");
+  const hooksFile = path7.join(dir, "hooks.json");
   const hooksObj = readJSONObj(hooksFile);
-  const cmd = (script) => `VOUCH_HOST=codex bash ${q(path6.join(SCRIPTS, script))}`;
+  const cmd = (script) => `VOUCH_HOST=codex bash ${q(path7.join(SCRIPTS, script))}`;
   mergeHookEvent(hooksObj, "SessionStart", [{ hooks: [{ type: "command", command: cmd("session-start.sh"), timeout: 10 }] }]);
   mergeHookEvent(hooksObj, "PostToolUse", [{ hooks: [{ type: "command", command: cmd("mark-dirty.sh"), timeout: 5 }] }]);
   mergeHookEvent(hooksObj, "Stop", [{ hooks: [{ type: "command", command: cmd("verify-stop.sh"), timeout: 240 }] }]);
   writeTarget(hooksFile, JSON.stringify(hooksObj, null, 2) + "\n", !!opts.dryRun, actions);
-  writeTarget(path6.join(dir, "skills", "understand-intent", "SKILL.md"), readFileOr(SKILL_SRC), !!opts.dryRun, actions);
+  writeTarget(path7.join(dir, "skills", "understand-intent", "SKILL.md"), readFileOr(SKILL_SRC), !!opts.dryRun, actions);
   actions.push({ kind: "note", target: "codex", detail: "MCP tools + hard-block verify loop + intent skill installed (global ~/.codex)." });
   actions.push({
     kind: "note",
@@ -1484,35 +1885,35 @@ function installCodex(opts, actions) {
 }
 function uninstallCodex(opts, actions) {
   const dir = codexDir();
-  const cfgToml = path6.join(dir, "config.toml");
-  if (fs7.existsSync(cfgToml)) writeTarget(cfgToml, removeTomlSection(readFileOr(cfgToml)).replace(/\n+$/, "\n"), !!opts.dryRun, actions);
-  const hooksFile = path6.join(dir, "hooks.json");
-  if (fs7.existsSync(hooksFile)) {
+  const cfgToml = path7.join(dir, "config.toml");
+  if (fs8.existsSync(cfgToml)) writeTarget(cfgToml, removeTomlSection(readFileOr(cfgToml)).replace(/\n+$/, "\n"), !!opts.dryRun, actions);
+  const hooksFile = path7.join(dir, "hooks.json");
+  if (fs8.existsSync(hooksFile)) {
     const obj = readJSONObj(hooksFile);
     removeVouchHooks(obj);
     writeTarget(hooksFile, JSON.stringify(obj, null, 2) + "\n", !!opts.dryRun, actions);
   }
-  const skill = path6.join(dir, "skills", "understand-intent", "SKILL.md");
-  if (fs7.existsSync(skill) && !opts.dryRun) {
-    fs7.rmSync(skill, { force: true });
+  const skill = path7.join(dir, "skills", "understand-intent", "SKILL.md");
+  if (fs8.existsSync(skill) && !opts.dryRun) {
+    fs8.rmSync(skill, { force: true });
   }
   actions.push({ kind: "note", target: "codex", detail: "Removed vouch MCP block, hooks, and skill." });
 }
 function cursorRoot(opts) {
-  return opts.global ? path6.join(os.homedir(), ".cursor") : path6.join(opts.projectDir ?? process.cwd(), ".cursor");
+  return opts.global ? path7.join(os.homedir(), ".cursor") : path7.join(opts.projectDir ?? process.cwd(), ".cursor");
 }
 function installCursor(opts, actions) {
   const root = cursorRoot(opts);
-  const mcpFile = path6.join(root, "mcp.json");
+  const mcpFile = path7.join(root, "mcp.json");
   const mcpObj = readJSONObj(mcpFile);
   mcpObj.mcpServers = mcpObj.mcpServers ?? {};
   mcpObj.mcpServers.vouch = mcpServerJSON("cursor");
   writeTarget(mcpFile, JSON.stringify(mcpObj, null, 2) + "\n", !!opts.dryRun, actions);
-  const hooksFile = path6.join(root, "hooks.json");
+  const hooksFile = path7.join(root, "hooks.json");
   const hooksObj = readJSONObj(hooksFile);
   hooksObj.version = hooksObj.version ?? 1;
-  const nodeCmd = (subcmd) => `VOUCH_HOST=cursor node ${q(path6.join(DIST, "cli.js"))} ${subcmd}`;
-  mergeHookEvent(hooksObj, "afterFileEdit", [{ command: `VOUCH_HOST=cursor bash ${q(path6.join(SCRIPTS, "mark-dirty.sh"))}` }]);
+  const nodeCmd = (subcmd) => `VOUCH_HOST=cursor node ${q(path7.join(DIST, "cli.js"))} ${subcmd}`;
+  mergeHookEvent(hooksObj, "afterFileEdit", [{ command: `VOUCH_HOST=cursor bash ${q(path7.join(SCRIPTS, "mark-dirty.sh"))}` }]);
   mergeHookEvent(hooksObj, "stop", [{ command: nodeCmd("cursor-stop") }]);
   if (opts.strict) {
     mergeHookEvent(hooksObj, "beforeShellExecution", [{ command: nodeCmd("cursor-guard"), failClosed: true }]);
@@ -1534,7 +1935,7 @@ function installCursor(opts, actions) {
     "- To check on demand, call the `verify` tool. Dismiss a genuine non-issue with `dismiss_finding`.",
     ""
   ].join("\n");
-  writeTarget(path6.join(root, "rules", "vouch.mdc"), rule, !!opts.dryRun, actions);
+  writeTarget(path7.join(root, "rules", "vouch.mdc"), rule, !!opts.dryRun, actions);
   actions.push({
     kind: "note",
     target: "cursor",
@@ -1543,20 +1944,20 @@ function installCursor(opts, actions) {
 }
 function uninstallCursor(opts, actions) {
   const root = cursorRoot(opts);
-  const mcpFile = path6.join(root, "mcp.json");
-  if (fs7.existsSync(mcpFile)) {
+  const mcpFile = path7.join(root, "mcp.json");
+  if (fs8.existsSync(mcpFile)) {
     const obj = readJSONObj(mcpFile);
     if (obj.mcpServers) delete obj.mcpServers.vouch;
     writeTarget(mcpFile, JSON.stringify(obj, null, 2) + "\n", !!opts.dryRun, actions);
   }
-  const hooksFile = path6.join(root, "hooks.json");
-  if (fs7.existsSync(hooksFile)) {
+  const hooksFile = path7.join(root, "hooks.json");
+  if (fs8.existsSync(hooksFile)) {
     const obj = readJSONObj(hooksFile);
     removeVouchHooks(obj);
     writeTarget(hooksFile, JSON.stringify(obj, null, 2) + "\n", !!opts.dryRun, actions);
   }
-  const rule = path6.join(root, "rules", "vouch.mdc");
-  if (fs7.existsSync(rule) && !opts.dryRun) fs7.rmSync(rule, { force: true });
+  const rule = path7.join(root, "rules", "vouch.mdc");
+  if (fs8.existsSync(rule) && !opts.dryRun) fs8.rmSync(rule, { force: true });
   actions.push({ kind: "note", target: "cursor", detail: "Removed vouch MCP server, hooks, and rule." });
 }
 function runInstall(tool, opts) {
@@ -1575,10 +1976,10 @@ function runUninstall(tool, opts) {
 }
 function statusLines(opts) {
   const out = [];
-  const codexToml = path6.join(codexDir(), "config.toml");
-  out.push(`codex:  MCP ${readFileOr(codexToml).includes(TOML_HEADER) ? "\u2713" : "\u2014"}  hooks ${readFileOr(path6.join(codexDir(), "hooks.json")).includes("_vouch") ? "\u2713" : "\u2014"}  (~/.codex)`);
+  const codexToml = path7.join(codexDir(), "config.toml");
+  out.push(`codex:  MCP ${readFileOr(codexToml).includes(TOML_HEADER) ? "\u2713" : "\u2014"}  hooks ${readFileOr(path7.join(codexDir(), "hooks.json")).includes("_vouch") ? "\u2713" : "\u2014"}  (~/.codex)`);
   const croot = cursorRoot(opts);
-  out.push(`cursor: MCP ${readFileOr(path6.join(croot, "mcp.json")).includes('"vouch"') ? "\u2713" : "\u2014"}  hooks ${readFileOr(path6.join(croot, "hooks.json")).includes("_vouch") ? "\u2713" : "\u2014"}  (${opts.global ? "~/.cursor" : croot})`);
+  out.push(`cursor: MCP ${readFileOr(path7.join(croot, "mcp.json")).includes('"vouch"') ? "\u2713" : "\u2014"}  hooks ${readFileOr(path7.join(croot, "hooks.json")).includes("_vouch") ? "\u2713" : "\u2014"}  (${opts.global ? "~/.cursor" : croot})`);
   return out;
 }
 function formatActions(actions, dryRun) {
@@ -1634,7 +2035,7 @@ function writeFindingsLog(proj, result) {
   }
 }
 function looksLikeProject(proj) {
-  return exists(path7.join(proj, ".git")) || exists(path7.join(proj, "package.json")) || exists(path7.join(proj, "pyproject.toml")) || exists(path7.join(proj, "requirements.txt")) || exists(path7.join(proj, "Makefile"));
+  return exists(path8.join(proj, ".git")) || exists(path8.join(proj, "package.json")) || exists(path8.join(proj, "pyproject.toml")) || exists(path8.join(proj, "requirements.txt")) || exists(path8.join(proj, "Makefile"));
 }
 async function computeStopDecision(hook) {
   const proj = resolveProj(hook);
@@ -1661,6 +2062,40 @@ async function computeStopDecision(hook) {
       systemMessage: `Vouch: released after ${cfg.enforcement.maxIterations} fix rounds \u2014 ${result2.blocking.length} issue(s) still unresolved. Run /vouch:status for details.`
     };
   }
+  if (cfg.probe.enabled && state.probes?.length && cfg.enforcement.block) {
+    const dismissals = loadDismissals(proj);
+    const active = state.probes.filter((p) => !dismissals.some((d) => d.fingerprint === p.id));
+    if (active.length) {
+      const { stillFailing } = await rerunStoredProbes(active, proj, cfg.probe.timeoutSec);
+      if (stillFailing.length) {
+        const round2 = state.iteration + 1;
+        const roundInfo = `(verification round ${round2}/${cfg.enforcement.maxIterations} \u2014 probe re-check)`;
+        const fixPrompt = buildFixPrompt(stillFailing, [], roundInfo);
+        const summary = `Vouch: ${stillFailing.length} proven issue(s) still failing`;
+        writeFindingsLog(proj, {
+          diffEmpty: false,
+          ranTiers: ["intent"],
+          skipped: [],
+          findings: stillFailing,
+          blocking: stillFailing,
+          questions: [],
+          notices: [],
+          fixPrompt,
+          summary
+        });
+        saveState(proj, {
+          lastDiffHash: state.lastDiffHash,
+          iteration: round2,
+          probes: active.filter((p) => stillFailing.some((f) => f.id === p.id))
+        });
+        return {
+          kind: "block",
+          fixPrompt,
+          systemMessage: `${summary} \u2014 blocking (round ${round2}/${cfg.enforcement.maxIterations})`
+        };
+      }
+    }
+  }
   const round = state.iteration + 1;
   const result = await runPipeline({
     proj,
@@ -1670,7 +2105,8 @@ async function computeStopDecision(hook) {
   });
   writeFindingsLog(proj, result);
   if (cfg.enforcement.block && result.blocking.length) {
-    saveState(proj, { lastDiffHash: state.lastDiffHash, iteration: round });
+    const proven = result.blocking.filter((f) => f.provenBy === "probe" && f.command).map((f) => ({ id: f.id, title: f.title, file: f.file, criterion: f.criterion, command: f.command }));
+    saveState(proj, { lastDiffHash: state.lastDiffHash, iteration: round, probes: proven.length ? proven : void 0 });
     return {
       kind: "block",
       fixPrompt: result.fixPrompt,

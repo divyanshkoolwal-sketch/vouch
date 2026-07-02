@@ -3,12 +3,16 @@
 // block→fix→re-verify iteration counter that caps the loop.
 import * as fs from 'fs';
 import { statePath, dirtyPath, readJSON, writeJSON, runsDir } from './memory';
+import { StoredProbe } from './types';
 
 export interface RunState {
   /** Hash of the diff we last verified clean (or last blocked on). */
   lastDiffHash: string | null;
   /** Consecutive block rounds in the current verify cycle. */
   iteration: number;
+  /** Probes that PROVED failures in the last blocking round — re-run
+   *  deterministically (no LLM) at the next stop before the full pipeline. */
+  probes?: StoredProbe[];
 }
 
 export function loadState(proj: string): RunState {

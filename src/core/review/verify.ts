@@ -41,6 +41,7 @@ async function askOne(proj: string, finding: Finding, intent: IntentRecord, cfg:
       maxTurns: 6,
     },
     cfg,
+    'verify', // cross-model when available — independence is the point
   );
   if (!res || res.isError) return null;
   const parsed = extractJSON(res.text);

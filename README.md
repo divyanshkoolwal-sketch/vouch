@@ -131,17 +131,25 @@ When a finding is a genuine non‑issue, dismiss it (by its `vouch id`) and Vouc
 intent → agent writes code → [you stop] → Stop hook (only if the diff changed)
                                               │
    Scope:      merge-base diff + --function-context; monorepo → affected packages
+   Integrity:  deterministic diff analysis — tests weakened to force a green run?
+               (.only/.skip added, assertions loosened/deleted, expectations drifted)
    Tier 1:     typecheck → lint → build → test   (facts; TEST TIER narrowed by test-impact analysis)
    Tier 2:     grounded review of the diff vs intent →
                  MAP (parallel, per chunk, quote-first)  →  REDUCE (dedupe/rank)
-                 →  EVIDENCE GATE (drop findings whose quote isn't literally in the code)
-                 →  CoVe QUORUM (N independent skeptics refute-by-default; keep only confirmed)
+                 →  EVIDENCE GATE (drop findings whose citation isn't real code)
+                 →  CoVe QUORUM (independent skeptics on a DIFFERENT model when available)
+                 →  PROBE ("no repro, no block": generate + execute a tiny script that
+                     demonstrates the violation — proven → a blocking FACT with a runnable repro;
+                     not reproducible → downgraded)
                                               │
-              blocking facts? ─► block + ONE grounded fix-prompt ─► agent fixes ─► re-verify (loop, capped)
+              blocking facts? ─► block + ONE grounded fix-prompt ─► agent fixes ─►
+                 re-verify (proven probes re-run deterministically first — no LLM; loop, capped)
               clean / only questions? ─► allow stop (+ surface questions + honest coverage)
 ```
 
-- **Two deterministic gates carry the accuracy.** Research is clear that un-grounded self-critique *lowers* accuracy, and models mis-cite ~50% of the time — so the guarantees are non-LLM: (1) the **evidence gate** drops any behavioral finding whose quoted code isn't literally present; (2) the **CoVe quorum** keeps a finding only if a majority of *independent* skeptics (who can't see the original claim) confirm it against the real code. The LLM improves candidate quality; the gates guarantee low false positives.
+- **Deterministic gates carry the accuracy.** Research is clear that un-grounded self-critique *lowers* accuracy, and models mis-cite ~50% of the time — so the guarantees are non-LLM: the **evidence gate** drops findings that don't cite real code; the **CoVe quorum** keeps a finding only if independent skeptics confirm it against the real code; and the **probe** turns a surviving opinion into an *executable fact* (or falsifies it). The LLM improves candidate quality; execution decides.
+- **Cross-model verification.** When more than one agent CLI is installed (e.g. Claude Code + Codex), verification votes and probe generation run on a **different model** than the one that reviewed the diff — breaking same-model self-leniency and vote correlation. The coverage line always tells you which model served which role.
+- **Reward-hack detection.** The integrity tier deterministically flags tests weakened in the same diff that changes production code — added `.only`/`.skip`, strict matchers loosened to vacuous ones, deleted assertions, expectation drift. The classic "make the test pass by changing the test" move blocks by default.
 - **Scales without truncation.** Big changes are chunked and reviewed in parallel (map-reduce) with absolute line numbers, never truncated. Monorepos are scoped to affected packages; the test tier runs only affected tests (with a safe fallback to the full suite on any root-file change). Everything Vouch couldn't fully cover is reported — never conflated with "clean."
 - **The brain is one shared core.** Hooks can't call MCP, so all logic lives in `src/core/` and is reached two ways: the **MCP server** (`dist/mcp.js`) and a **CLI** (`dist/cli.js`, invoked by the hooks).
 - **Independent + bounded.** The reviewer is a fresh read-only `claude -p` (no stake in the code, inherits your auth, `VOUCH_DISABLE=1` prevents hook recursion). The block→fix→re-verify loop is capped (default 3) via `stop_hook_active`, with `/vouch:off` as a kill switch.
@@ -166,13 +174,20 @@ intent → agent writes code → [you stop] → Stop hook (only if the diff chan
     "build":     { "cmd": "npm run build",    "enabled": true },
     "test":      { "cmd": "npm test",         "enabled": true }
   },
-  "tiers":   { "typecheck": true, "lint": true, "build": true, "test": true, "intent": true, "smoke": false },
+  "tiers":   { "typecheck": true, "lint": true, "build": true, "test": true, "integrity": true, "intent": true, "smoke": false },
   "enforcement": {
     "block": true,
-    "blockOn": ["typecheck", "build", "test"],   // only deterministic facts block by default
+    "blockOn": ["typecheck", "build", "test", "integrity"],  // deterministic facts block by default
+    "blockWhenProven": true,           // a probe-proven behavioral finding blocks (it has a runnable repro)
     "maxIterations": 3
   },
-  "reviewer": { "model": null, "timeoutSec": 90 }, // model: null = inherit your default; set e.g. a faster model to cut cost
+  "reviewer": {
+    "model": null,                     // null = inherit your default
+    "timeoutSec": 90,
+    "backend": "auto",                 // which CLI reviews the diff (claude|codex|cursor|api)
+    "verifierBackend": "auto"          // auto = a DIFFERENT model verifies, when available
+  },
+  "probe": { "enabled": true, "timeoutSec": 20, "maxPerRun": 5 },  // "no repro, no block"
   "mode": "thorough",                // thorough (max accuracy, default) | bounded | fast
   "review": {
     "concurrency": 4,                // max parallel review calls
@@ -205,7 +220,7 @@ intent → agent writes code → [you stop] → Stop hook (only if the diff chan
 `record_intent`, `get_active_intent`, `clear_intent`, `verify`, `dismiss_finding`, `record_convention`, `get_setup_suggestion`, `get_config`, `configure`, `get_status`, `set_enabled`.
 
 ## Measuring accuracy
-`npm run eval` runs the review pipeline over a golden set (`src/eval/cases.ts`: correct diffs, seeded defects, and correct-but-unusual "hard negatives") and prints a confusion matrix + false-positive rate, failing if effective-FP exceeds **10%** (Google's "developers will disable it" threshold) or recall drops below the floor. This is how "accuracy" is a measured number here, not a claim. Add your own cases to tune the reviewer for your repo.
+`npm run eval` runs the review pipeline over a golden set (`src/eval/cases.ts`: correct diffs, seeded defects, and correct-but-unusual "hard negatives") and prints a confusion matrix + false-positive rate, failing if effective-FP exceeds **10%** (Google's "developers will disable it" threshold) or recall drops below the floor. It also reports how many seeded behavioral bugs were **probe-proven** — escalated from "flagged" to an executable fact with a runnable repro. This is how "accuracy" is a measured number here, not a claim. Add your own cases to tune the reviewer for your repo.
 
 ## Limitations & roadmap
 - **Targets Claude Code.** The memory format and core are tool-agnostic by design; a Codex adapter is future work.

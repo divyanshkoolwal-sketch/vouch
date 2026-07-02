@@ -14,6 +14,7 @@ export function defaultConfig(): VouchConfig {
       lint: true,
       build: true,
       test: true,
+      integrity: true,
       intent: true,
       smoke: false,
     },
@@ -21,14 +22,23 @@ export function defaultConfig(): VouchConfig {
       block: true,
       // Only objective, deterministic failures block by default. Lint and the
       // LLM intent review are advisory unless the user opts them in — this is
-      // the core false-positive guardrail.
-      blockOn: ['typecheck', 'build', 'test'],
+      // the core false-positive guardrail. 'integrity' is deterministic diff
+      // analysis (test-weakening detection); only its high-signal detectors
+      // emit blocking-class findings.
+      blockOn: ['typecheck', 'build', 'test', 'integrity'],
+      blockWhenProven: true,
       maxIterations: 3,
     },
     reviewer: {
       model: undefined,
       timeoutSec: 90,
       backend: 'auto',
+      verifierBackend: 'auto',
+    },
+    probe: {
+      enabled: true,
+      timeoutSec: 20,
+      maxPerRun: 5,
     },
     // Default to max accuracy (per product decision): full map-reduce + N-vote
     // independent verification. Budget-bounded so a huge repo degrades honestly
@@ -60,6 +70,7 @@ export function normalizeConfig(stored: Partial<VouchConfig> | null): VouchConfi
     tiers: { ...d.tiers, ...(stored.tiers ?? {}) },
     enforcement: { ...d.enforcement, ...(stored.enforcement ?? {}) },
     reviewer: { ...d.reviewer, ...(stored.reviewer ?? {}) },
+    probe: { ...d.probe, ...(stored.probe ?? {}) },
     mode: stored.mode ?? d.mode,
     review: { ...d.review, ...(stored.review ?? {}) },
     tia: { ...d.tia, ...(stored.tia ?? {}) },

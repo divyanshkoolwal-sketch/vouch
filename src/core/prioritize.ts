@@ -11,6 +11,7 @@ export function coverageLine(cov?: CoverageReport): string {
   if (cov.packagesScoped.length) bits.push(`packages: ${cov.packagesScoped.join(', ')}`);
   if (cov.testsSelected != null) bits.push(`${cov.testsSelected} changed file(s) targeted for tests`);
   if (cov.budgetHit) bits.push('time budget reached — coverage partial');
+  for (const n of cov.notes ?? []) bits.push(n);
   return bits.length ? `coverage: ${bits.join('; ')}` : '';
 }
 

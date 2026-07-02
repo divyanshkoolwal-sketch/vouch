@@ -9,9 +9,11 @@ import { runPipeline } from './core/pipeline';
 import { isDirty, clearDirty, markDirty, loadState, saveState } from './core/runState';
 import { workingDiff } from './core/diff';
 import { readText, conventionsPath, findingsLogPath, writeJSON, readJSON, exists, offPath } from './core/memory';
+import { rerunStoredProbes } from './core/review/probe';
+import { loadDismissals } from './core/dismissals';
 import * as path from 'path';
-import { VerifyResult } from './core/types';
-import { coverageLine } from './core/prioritize';
+import { VerifyResult, StoredProbe } from './core/types';
+import { coverageLine, buildFixPrompt } from './core/prioritize';
 import { StopDecision, claudeStopOutput, cursorStopOutput, cursorGuardOutput } from './core/hostOutput';
 import { runInstall, runUninstall, statusLines, formatActions, InstallOpts } from './install';
 
@@ -114,6 +116,44 @@ async function computeStopDecision(hook: any): Promise<StopDecision> {
     };
   }
 
+  // Probe quick-path: probes that PROVED failures last round are re-run
+  // deterministically first (no LLM). Still failing → re-block instantly; the
+  // fix loop converges on executable evidence. All clear → full pipeline.
+  if (cfg.probe.enabled && state.probes?.length && cfg.enforcement.block) {
+    const dismissals = loadDismissals(proj);
+    const active = state.probes.filter((p) => !dismissals.some((d) => d.fingerprint === p.id));
+    if (active.length) {
+      const { stillFailing } = await rerunStoredProbes(active, proj, cfg.probe.timeoutSec);
+      if (stillFailing.length) {
+        const round = state.iteration + 1;
+        const roundInfo = `(verification round ${round}/${cfg.enforcement.maxIterations} — probe re-check)`;
+        const fixPrompt = buildFixPrompt(stillFailing, [], roundInfo);
+        const summary = `Vouch: ${stillFailing.length} proven issue(s) still failing`;
+        writeFindingsLog(proj, {
+          diffEmpty: false,
+          ranTiers: ['intent'],
+          skipped: [],
+          findings: stillFailing,
+          blocking: stillFailing,
+          questions: [],
+          notices: [],
+          fixPrompt,
+          summary,
+        });
+        saveState(proj, {
+          lastDiffHash: state.lastDiffHash,
+          iteration: round,
+          probes: active.filter((p) => stillFailing.some((f) => f.id === p.id)),
+        });
+        return {
+          kind: 'block',
+          fixPrompt,
+          systemMessage: `${summary} — blocking (round ${round}/${cfg.enforcement.maxIterations})`,
+        };
+      }
+    }
+  }
+
   const round = state.iteration + 1;
   const result = await runPipeline({
     proj,
@@ -125,7 +165,11 @@ async function computeStopDecision(hook: any): Promise<StopDecision> {
 
   if (cfg.enforcement.block && result.blocking.length) {
     // Do NOT clear dirty / advance baseline on block — only a real fix clears it.
-    saveState(proj, { lastDiffHash: state.lastDiffHash, iteration: round });
+    // Persist probe-proven failures so the next round re-checks them for free.
+    const proven: StoredProbe[] = result.blocking
+      .filter((f) => f.provenBy === 'probe' && f.command)
+      .map((f) => ({ id: f.id, title: f.title, file: f.file, criterion: f.criterion, command: f.command! }));
+    saveState(proj, { lastDiffHash: state.lastDiffHash, iteration: round, probes: proven.length ? proven : undefined });
     return {
       kind: 'block',
       fixPrompt: result.fixPrompt,

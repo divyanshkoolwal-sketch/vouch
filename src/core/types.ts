@@ -9,7 +9,29 @@ export type Confidence = 'fact' | 'high' | 'medium' | 'low';
  *  surfaced but never blocks; `info` is purely advisory. */
 export type FindingKind = 'blocking' | 'question' | 'info';
 
-export type TierName = 'typecheck' | 'lint' | 'build' | 'test' | 'intent' | 'smoke';
+export type TierName = 'typecheck' | 'lint' | 'build' | 'test' | 'integrity' | 'intent' | 'smoke';
+
+/** Result of executing a finding-guided probe (a tiny script that demonstrates a
+ *  violated acceptance criterion by exiting non-zero with a marker). */
+export interface ProbeInfo {
+  /** Probe script path, relative to the project root (under .vouch/runs/probes/). */
+  path: string;
+  /** Exact command to reproduce, e.g. `node ".vouch/runs/probes/<id>.cjs"`. */
+  command: string;
+  language: 'node' | 'python';
+  outcome: 'proven' | 'not-reproduced' | 'inconclusive';
+  outputTail?: string;
+}
+
+/** Minimal probe record persisted across fix-loop rounds so a proven failure can
+ *  be re-checked deterministically (no LLM) on the next stop. */
+export interface StoredProbe {
+  id: string; // the finding's fingerprint
+  title: string;
+  file?: string;
+  criterion?: string;
+  command: string;
+}
 
 export interface Finding {
   /** Stable fingerprint — used for dedupe and dismissal suppression. */
@@ -40,6 +62,10 @@ export interface Finding {
    *  grounding signal). Prose-only evidence (e.g. from some models) is false and
    *  must instead be confirmed by the independent CoVe quorum to be surfaced. */
   evidenceVerbatim?: boolean;
+  /** Set when an executed probe demonstrated the violation — the finding is then
+   *  a deterministic FACT (runnable repro), not an opinion. */
+  provenBy?: 'probe';
+  probe?: ProbeInfo;
   /** Numeric confidence 0..1 (from quorum agreement + the model's own score). */
   score?: number;
 }
@@ -96,6 +122,9 @@ export interface VouchConfig {
     /** Which tiers are allowed to *block* the agent. Tiers not listed here only
      *  ever produce non-blocking findings. */
     blockOn: TierName[];
+    /** A probe-proven behavioral finding (runnable repro) blocks regardless of
+     *  whether the intent tier is in blockOn — it's a fact now. Default true. */
+    blockWhenProven: boolean;
     /** Loop cap: max consecutive block→fix→re-verify rounds before releasing. */
     maxIterations: number;
   };
@@ -106,8 +135,20 @@ export interface VouchConfig {
     /** Which headless backend runs the review. 'auto' prefers the host agent's
      *  own CLI (claude/codex/cursor-agent), then falls back. */
     backend?: 'auto' | 'claude' | 'codex' | 'cursor' | 'api';
+    /** Backend for independent (CoVe) verification votes. 'auto' picks the best
+     *  available backend DIFFERENT from the map backend — cross-model checking
+     *  breaks same-model self-leniency; falls back to the map backend if it's
+     *  the only one available. */
+    verifierBackend?: 'auto' | 'claude' | 'codex' | 'cursor' | 'api';
     /** Env var name holding an API key for the 'api' backend (opt-in; never auto-billed). */
     apiKeyEnv?: string;
+  };
+  probe: {
+    /** Generate + execute a runnable probe for each verified behavioral finding
+     *  ("no repro, no block"). A failing probe upgrades the finding to a fact. */
+    enabled: boolean;
+    timeoutSec: number;
+    maxPerRun: number;
   };
   /** Verification intensity. thorough = full map-reduce + N-vote verification
    *  (max accuracy, default); bounded = cap chunks + single refutation;

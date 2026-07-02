@@ -26,7 +26,7 @@ function text(s: string) {
   return { content: [{ type: 'text' as const, text: s }] };
 }
 
-const server = new McpServer({ name: 'vouch', version: '0.3.1' });
+const server = new McpServer({ name: 'vouch', version: '0.4.0' });
 
 const cmdSchema = z.object({ cmd: z.string(), enabled: z.boolean() });
 
@@ -153,6 +153,7 @@ server.tool(
         lint: z.boolean().optional(),
         build: z.boolean().optional(),
         test: z.boolean().optional(),
+        integrity: z.boolean().optional(),
         intent: z.boolean().optional(),
         smoke: z.boolean().optional(),
       })
@@ -160,7 +161,8 @@ server.tool(
     enforcement: z
       .object({
         block: z.boolean().optional(),
-        blockOn: z.array(z.enum(['typecheck', 'lint', 'build', 'test', 'intent', 'smoke'])).optional(),
+        blockOn: z.array(z.enum(['typecheck', 'lint', 'build', 'test', 'integrity', 'intent', 'smoke'])).optional(),
+        blockWhenProven: z.boolean().optional(),
         maxIterations: z.number().int().min(1).max(10).optional(),
       })
       .optional(),

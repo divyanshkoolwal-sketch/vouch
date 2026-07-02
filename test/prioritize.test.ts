@@ -26,6 +26,24 @@ describe('buildFixPrompt', () => {
   });
 });
 
+describe('coverageLine', () => {
+  it('renders notes (e.g. cross-model reviewer info) — never silently dropped', async () => {
+    const { coverageLine } = await import('../src/core/prioritize');
+    const line = coverageLine({
+      filesChanged: 2,
+      filesReviewed: 2,
+      filesSkippedTooLarge: [],
+      chunksReviewed: 2,
+      packagesScoped: [],
+      testsSelected: null,
+      budgetHit: false,
+      notes: ['reviewer: map=claude, verify=codex (cross-model)'],
+    });
+    expect(line).toContain('2/2 changed files reviewed');
+    expect(line).toContain('cross-model');
+  });
+});
+
 describe('summaryLine', () => {
   it('reports counts', () => {
     expect(summaryLine([blocking], [question])).toBe('Vouch: 1 blocking, 1 question');

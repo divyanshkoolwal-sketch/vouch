@@ -43,6 +43,7 @@ function makeRunTier(spec: Partial<Record<TierName, 'pass' | 'fail' | 'missing'>
 
 function cfgWith(tiers: Partial<Record<TierName, string>>, over?: Partial<VouchConfig>): VouchConfig {
   const cfg = defaultConfig();
+  cfg.tiers.integrity = false; // most tests here focus on other tiers; wiring tested separately
   for (const [t, cmd] of Object.entries(tiers)) {
     (cfg.commands as any)[t] = { cmd, enabled: true };
     (cfg.tiers as any)[t] = true;
@@ -152,7 +153,7 @@ describe('pipeline decision logic', () => {
   it('advisory mode: a failing test surfaces as a non-blocking notice, never reported as "passed"', async () => {
     const r = await runPipeline({
       proj: proj(),
-      cfg: cfgWith({ test: 'npm test' }, { enforcement: { block: false, blockOn: ['test'], maxIterations: 3 } }),
+      cfg: cfgWith({ test: 'npm test' }, { enforcement: { block: false, blockOn: ['test'], blockWhenProven: true, maxIterations: 3 } }),
       intent: null,
       deps: deps({ runTier: makeRunTier({ test: 'fail' }) }),
     });
@@ -177,7 +178,7 @@ describe('pipeline decision logic', () => {
     const blockingReviewFinding: Finding[] = [makeFinding({ kind: 'blocking', tier: 'intent', title: 'criterion unmet', confidence: 'high', fpExtra: ['c'] })];
     const r = await runPipeline({
       proj: proj(),
-      cfg: cfgWith({ test: 'test' }, { enforcement: { block: true, blockOn: ['typecheck', 'build', 'test', 'intent'], maxIterations: 3 } }),
+      cfg: cfgWith({ test: 'test' }, { enforcement: { block: true, blockOn: ['typecheck', 'build', 'test', 'intent'], blockWhenProven: true, maxIterations: 3 } }),
       intent,
       deps: deps({ reviewerAvailable: () => true, reviewIntent: async () => blockingReviewFinding }),
     });

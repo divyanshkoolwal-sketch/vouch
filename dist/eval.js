@@ -23,9 +23,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/eval/run.ts
-var fs6 = __toESM(require("fs"));
+var fs7 = __toESM(require("fs"));
 var os = __toESM(require("os"));
-var path7 = __toESM(require("path"));
+var path8 = __toESM(require("path"));
 var import_child_process4 = require("child_process");
 
 // src/eval/cases.ts
@@ -34,9 +34,39 @@ var CASES = [
     name: "bad-missing-upper-clamp",
     bucket: "bad",
     expect: "flag",
+    expectProven: true,
     intent: { summary: "clamp(n) bounds its input to the inclusive range 0..100.", acceptance_criteria: ["returns 0 when n < 0", "returns 100 when n > 100", "returns n unchanged when 0<=n<=100"] },
     baseline: { "clamp.js": "function clamp(n){ return n; }\nmodule.exports={clamp};\n" },
     change: { "clamp.js": "function clamp(n){ if (n < 0) return 0; return n; }\nmodule.exports={clamp};\n" }
+  },
+  {
+    name: "bad-weakened-test",
+    bucket: "bad",
+    expect: "flag",
+    tiersOverride: { intent: false, integrity: true },
+    intent: { summary: "lineTotal multiplies price by qty.", acceptance_criteria: ["lineTotal(10,3) === 30"] },
+    baseline: {
+      "orders.js": "function lineTotal(p,q){ return p*q; }\nmodule.exports={lineTotal};\n",
+      "orders.test.js": "const {lineTotal}=require('./orders');\nit('multiplies', () => { expect(lineTotal(10,3)).toBe(30); });\n"
+    },
+    change: {
+      "orders.js": "function lineTotal(p,q){ return p+q; }\nmodule.exports={lineTotal};\n",
+      "orders.test.js": "const {lineTotal}=require('./orders');\nit('multiplies', () => { expect(lineTotal(10,3)).toBeDefined(); });\n"
+    }
+  },
+  {
+    name: "hardneg-test-refactor",
+    bucket: "hardneg",
+    expect: "clean",
+    tiersOverride: { intent: false, integrity: true },
+    intent: { summary: "rename a test for clarity.", acceptance_criteria: ["tests unchanged in behavior"] },
+    baseline: {
+      "orders.test.js": "const {lineTotal}=require('./orders');\nit('works', () => { expect(lineTotal(10,3)).toBe(30); });\n",
+      "orders.js": "function lineTotal(p,q){ return p*q; }\nmodule.exports={lineTotal};\n"
+    },
+    change: {
+      "orders.test.js": "const {lineTotal}=require('./orders');\nit('multiplies price by qty', () => { expect(lineTotal(10,3)).toBe(30); });\nit('handles zero qty', () => { expect(lineTotal(10,0)).toBe(0); });\n"
+    }
   },
   {
     name: "bad-no-negative-rejection",
@@ -86,8 +116,8 @@ var import_child_process = require("child_process");
 // src/core/findings.ts
 var import_crypto = require("crypto");
 function fingerprint(parts) {
-  const norm = parts.filter((p) => !!p).map((p) => p.trim().toLowerCase().replace(/\s+/g, " ")).join("");
-  return (0, import_crypto.createHash)("sha1").update(norm).digest("hex").slice(0, 12);
+  const norm2 = parts.filter((p) => !!p).map((p) => p.trim().toLowerCase().replace(/\s+/g, " ")).join("");
+  return (0, import_crypto.createHash)("sha1").update(norm2).digest("hex").slice(0, 12);
 }
 function makeFinding(input) {
   const id = fingerprint([input.tier, input.title, input.file, ...input.fpExtra ?? []]);
@@ -193,8 +223,8 @@ async function runTier(tier, rc, cwd, timeoutMs, blocking) {
 }
 
 // src/core/reviewer.ts
-var fs = __toESM(require("fs"));
-var path = __toESM(require("path"));
+var fs3 = __toESM(require("fs"));
+var path3 = __toESM(require("path"));
 
 // src/core/review/backends/spawn.ts
 var import_child_process2 = require("child_process");
@@ -420,38 +450,55 @@ var BACKENDS = {
 };
 var AUTO_ORDER = ["claude", "codex", "cursor"];
 var resolveCache = /* @__PURE__ */ new Map();
-function cacheKey(cfg) {
-  return `${cfg.reviewer.backend ?? "auto"}|${process.env.VOUCH_HOST ?? ""}|${cfg.reviewer.apiKeyEnv ?? ""}`;
+function cacheKey(cfg, role) {
+  return `${role}|${cfg.reviewer.backend ?? "auto"}|${cfg.reviewer.verifierBackend ?? "auto"}|${process.env.VOUCH_HOST ?? ""}|${cfg.reviewer.apiKeyEnv ?? ""}`;
 }
-function resolveBackend(cfg, backends = BACKENDS) {
-  const key = cacheKey(cfg);
-  if (resolveCache.has(key)) return resolveCache.get(key);
-  let chosen = null;
+function resolveMap(cfg, backends) {
   const explicit = cfg.reviewer.backend;
   if (explicit && explicit !== "auto") {
     const b = backends[explicit];
-    chosen = b && b.available(cfg) ? b : null;
-  } else {
-    const order = [];
-    const host = process.env.VOUCH_HOST;
-    if (host && backends[host]) order.push(host);
-    for (const n of AUTO_ORDER) if (!order.includes(n)) order.push(n);
-    for (const n of order) {
-      if (backends[n].available(cfg)) {
-        chosen = backends[n];
-        break;
-      }
-    }
-    if (!chosen && backends.api.available(cfg)) chosen = backends.api;
+    return b && b.available(cfg) ? b : null;
   }
+  const order = [];
+  const host = process.env.VOUCH_HOST;
+  if (host && backends[host]) order.push(host);
+  for (const n of AUTO_ORDER) if (!order.includes(n)) order.push(n);
+  for (const n of order) if (backends[n].available(cfg)) return backends[n];
+  if (backends.api.available(cfg)) return backends.api;
+  return null;
+}
+function resolveVerify(cfg, backends) {
+  const explicit = cfg.reviewer.verifierBackend;
+  if (explicit && explicit !== "auto") {
+    const b = backends[explicit];
+    return b && b.available(cfg) ? b : null;
+  }
+  const mapB = resolveMap(cfg, backends);
+  for (const n of AUTO_ORDER) {
+    if (mapB && n === mapB.name) continue;
+    if (backends[n].available(cfg)) return backends[n];
+  }
+  if (mapB?.name !== "api" && backends.api.available(cfg)) return backends.api;
+  return mapB;
+}
+function resolveBackend(cfg, role = "map", backends = BACKENDS) {
+  const key = cacheKey(cfg, role);
+  if (resolveCache.has(key)) return resolveCache.get(key);
+  const chosen = role === "map" ? resolveMap(cfg, backends) : resolveVerify(cfg, backends);
   resolveCache.set(key, chosen);
   return chosen;
 }
 function backendAvailable(cfg, backends) {
-  return resolveBackend(cfg, backends) != null;
+  return resolveBackend(cfg, "map", backends) != null;
 }
-async function runReviewer(req, cfg) {
-  const backend = resolveBackend(cfg);
+function describeBackends(cfg) {
+  return {
+    map: resolveBackend(cfg, "map")?.name ?? null,
+    verify: resolveBackend(cfg, "verify")?.name ?? null
+  };
+}
+async function runReviewer(req, cfg, role = "map") {
+  const backend = resolveBackend(cfg, role);
   if (!backend) return null;
   return backend.run(req, cfg);
 }
@@ -641,7 +688,9 @@ async function askOne(proj, finding, intent, cfg) {
       timeoutSec: cfg.reviewer.timeoutSec,
       maxTurns: 6
     },
-    cfg
+    cfg,
+    "verify"
+    // cross-model when available — independence is the point
   );
   if (!res || res.isError) return null;
   const parsed = extractJSON(res.text);
@@ -677,6 +726,215 @@ async function verifyFindings(findings, opts) {
   return kept;
 }
 
+// src/core/review/probe.ts
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
+
+// src/core/memory.ts
+var fs = __toESM(require("fs"));
+var path = __toESM(require("path"));
+function vouchDir(proj) {
+  return path.join(proj, ".vouch");
+}
+function runsDir(proj) {
+  return path.join(vouchDir(proj), "runs");
+}
+function configPath(proj) {
+  return path.join(vouchDir(proj), "config.json");
+}
+function intentDir(proj) {
+  return path.join(vouchDir(proj), "intent");
+}
+function activeIntentPath(proj) {
+  return path.join(intentDir(proj), "active.json");
+}
+function dismissalsPath(proj) {
+  return path.join(vouchDir(proj), "dismissals.json");
+}
+function ensureVouchDir(proj) {
+  fs.mkdirSync(runsDir(proj), { recursive: true });
+  fs.mkdirSync(intentDir(proj), { recursive: true });
+  const gi = path.join(vouchDir(proj), ".gitignore");
+  if (!fs.existsSync(gi)) {
+    fs.writeFileSync(gi, "runs/\n");
+  }
+}
+function readJSON(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    const raw = fs.readFileSync(file, "utf8");
+    if (!raw.trim()) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function writeJSON(file, obj) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n");
+}
+function exists(file) {
+  try {
+    return fs.existsSync(file);
+  } catch {
+    return false;
+  }
+}
+
+// src/core/review/probe.ts
+var PROBE_MARKER = "VOUCH_PROBE_VIOLATION";
+var MARKER_LINE = new RegExp(`^${PROBE_MARKER}:`, "m");
+var NODE_FORBIDDEN = [
+  /child_process/,
+  /\bexec(Sync)?\s*\(/,
+  /\bspawn(Sync)?\s*\(/,
+  /fs\.(write|append|rm|unlink|mkdir|rename|cp|chmod|truncate|createWriteStream)/,
+  /require\(\s*['"](http|https|net|tls|dgram|dns|worker_threads)['"]\s*\)/,
+  /\bfetch\s*\(/,
+  /XMLHttpRequest|WebSocket/
+];
+var PY_FORBIDDEN = [
+  /\bsubprocess\b/,
+  /os\.(system|popen|remove|rmdir|unlink|rename)/,
+  /shutil\./,
+  /\bopen\s*\([^)]*['"][wax]/,
+  /\brequests\b/,
+  /urllib/,
+  /\bsocket\b/
+];
+function screenProbe(code, language) {
+  if (!code || !code.trim()) return "empty probe";
+  if (code.length > 4e3) return "probe too large";
+  if (!code.includes(PROBE_MARKER)) return "probe missing the violation marker";
+  const rules = language === "node" ? NODE_FORBIDDEN : PY_FORBIDDEN;
+  for (const re of rules) {
+    if (re.test(code)) return `probe uses a forbidden API (${re.source.slice(0, 40)})`;
+  }
+  return null;
+}
+function probeEligible(f) {
+  const file = f.file ?? "";
+  if (/\.[cm]?js$/.test(file)) return "node";
+  if (/\.py$/.test(file)) return "python";
+  return null;
+}
+var GEN_SYSTEM = [
+  "You write a PROBE: a tiny standalone script that checks ONE suspected problem in a repo.",
+  "Contract (strict):",
+  "- The probe will run with CWD = the repo root.",
+  "- Node probes are CommonJS. Load the target module with: const m = require(require('path').join(process.cwd(), '<relative path from repo root>'));",
+  "- Python probes: import sys, os; sys.path.insert(0, os.getcwd()); then import the module.",
+  `- Check ONLY the stated criterion. If it is VIOLATED by the current code: print "${PROBE_MARKER}: <one-line reason>" and exit with code 1. If it is satisfied: print "ok" and exit 0.`,
+  "- Standard library only. No file writes, no network, no subprocesses, no external packages.",
+  "- Keep it under 40 lines.",
+  'Output a SINGLE JSON object and nothing else: {"language":"node"|"python","code":"<full script>"}',
+  'If a reliable probe is not possible (e.g. the target cannot be imported directly), output {"language":"none"}.'
+].join("\n");
+function genPrompt(f, intent) {
+  return [
+    `# INTENT
+${intent.summary}`,
+    f.criterion ? `
+# CRITERION TO PROBE
+${f.criterion}` : "\n# CRITERION TO PROBE\n(general intent above)",
+    `
+# SUSPECTED PROBLEM
+${f.title}
+${f.detail ?? ""}`,
+    `
+# TARGET MODULE
+${f.file ?? "(unknown)"}`,
+    f.evidence ? `
+# CODE THE REVIEWER QUOTED
+\`\`\`
+${f.evidence}
+\`\`\`` : "",
+    "\nWrite the probe now. Return the JSON object only."
+  ].filter(Boolean).join("\n");
+}
+function probesDirFor(proj) {
+  return path2.join(runsDir(proj), "probes");
+}
+async function executeProbe(proj, id, language, code, timeoutSec) {
+  const dir = probesDirFor(proj);
+  fs2.mkdirSync(dir, { recursive: true });
+  const ext = language === "python" ? "py" : "cjs";
+  const abs = path2.join(dir, `${id}.${ext}`);
+  fs2.writeFileSync(abs, code);
+  const rel = path2.relative(proj, abs);
+  const command = language === "python" ? `python3 "${rel}"` : `node "${rel}"`;
+  const r = await runCommand(command, proj, timeoutSec * 1e3);
+  const violated = r.code !== null && r.code !== 0 && MARKER_LINE.test(r.output);
+  const outcome = violated ? "proven" : r.code === 0 ? "not-reproduced" : "inconclusive";
+  return { path: rel, command, language, outcome, outputTail: r.output.slice(-400) };
+}
+async function defaultGenerate(f, intent, cfg, proj) {
+  const res = await runReviewer(
+    {
+      cwd: proj,
+      systemPrompt: GEN_SYSTEM,
+      userPrompt: genPrompt(f, intent),
+      model: cfg.reviewer.model,
+      timeoutSec: cfg.reviewer.timeoutSec,
+      maxTurns: 6
+    },
+    cfg,
+    "verify"
+  );
+  if (!res || res.isError) return null;
+  return extractJSON(res.text);
+}
+async function runProbes(findings, opts) {
+  const { proj, intent, cfg } = opts;
+  const gen = opts.deps?.generate ?? defaultGenerate;
+  const out = [...findings];
+  const candidates = findings.map((f, i) => ({ f, i })).filter(({ f }) => f.tier === "intent" && probeEligible(f));
+  const ineligible = findings.filter((f) => f.tier === "intent" && !probeEligible(f)).length;
+  if (ineligible) opts.onNote?.(`probes: ${ineligible} finding(s) skipped (module not directly runnable, e.g. TypeScript)`);
+  const capped = candidates.slice(0, cfg.probe.maxPerRun);
+  if (candidates.length > capped.length) opts.onNote?.(`probes: capped at ${cfg.probe.maxPerRun} (of ${candidates.length})`);
+  await mapLimit(capped, cfg.review.concurrency, async ({ f, i }) => {
+    if (opts.deadlineMs && Date.now() + cfg.probe.timeoutSec * 1e3 > opts.deadlineMs) {
+      opts.onNote?.("probes: skipped (time budget reached)");
+      return;
+    }
+    const g = await gen(f, intent, cfg, proj);
+    const language = g?.language === "node" || g?.language === "python" ? g.language : null;
+    if (!language || typeof g?.code !== "string") return;
+    if (probeEligible(f) !== language) return;
+    const reason = screenProbe(g.code, language);
+    if (reason) {
+      opts.onNote?.(`probe for "${f.title}" not executed: ${reason}`);
+      return;
+    }
+    const info = await executeProbe(proj, f.id, language, g.code, cfg.probe.timeoutSec);
+    if (info.outcome === "proven") {
+      const block = cfg.enforcement.block && cfg.enforcement.blockWhenProven;
+      out[i] = {
+        ...f,
+        kind: block ? "blocking" : f.kind,
+        confidence: "fact",
+        verified: true,
+        provenBy: "probe",
+        command: info.command,
+        probe: info,
+        detail: [f.detail ?? "", `Probe demonstrated the violation \u2014 reproduce with: ${info.command}
+${(info.outputTail ?? "").trim()}`].filter(Boolean).join("\n")
+      };
+    } else if (info.outcome === "not-reproduced") {
+      out[i] = {
+        ...f,
+        score: (f.score ?? 0.5) * 0.5,
+        probe: info,
+        detail: [f.detail ?? "", "Note: an automated probe could NOT reproduce this \u2014 verify before treating it as a bug."].filter(Boolean).join("\n")
+      };
+    } else {
+      out[i] = { ...f, probe: info };
+    }
+  });
+  return out;
+}
+
 // src/core/reviewer.ts
 function reviewerAvailable(cfg) {
   return backendAvailable(cfg);
@@ -684,7 +942,7 @@ function reviewerAvailable(cfg) {
 function fileReader(proj) {
   return (rel) => {
     try {
-      return fs.readFileSync(path.join(proj, rel), "utf8");
+      return fs3.readFileSync(path3.join(proj, rel), "utf8");
     } catch {
       return null;
     }
@@ -695,19 +953,24 @@ async function reviewIntent(opts) {
   if (!chunks.length) return [];
   const rc = opts.deps?.reviewChunk ?? reviewChunk;
   const vf = opts.deps?.verifyFindings ?? verifyFindings;
+  const rp = opts.deps?.runProbes ?? runProbes;
   const mapped = (await mapLimit(chunks, cfg.review.concurrency, (chunk) => rc({ proj, intent, chunk, cfg }))).flat();
   const reduced = reduceFindings(mapped);
   const grounded = groundFindings(reduced, fileReader(proj)).kept;
   if (grounded.length === 0) return grounded;
   if (cfg.mode === "fast") return grounded.filter((f) => f.evidenceVerbatim);
-  return vf(grounded, { proj, intent, cfg });
+  let verified = await vf(grounded, { proj, intent, cfg });
+  if (cfg.probe.enabled && verified.length) {
+    verified = await rp(verified, { proj, intent, cfg, deadlineMs: opts.deadlineMs, onNote: opts.onNote });
+  }
+  return verified;
 }
 
 // src/core/diff.ts
 var import_child_process3 = require("child_process");
 var import_crypto2 = require("crypto");
-var fs2 = __toESM(require("fs"));
-var path2 = __toESM(require("path"));
+var fs4 = __toESM(require("fs"));
+var path4 = __toESM(require("path"));
 var EXCLUDE_VOUCH = ":(exclude).vouch";
 var MAX_UNTRACKED_FILE_LINES = 800;
 function git(proj, args) {
@@ -782,10 +1045,10 @@ function workingDiff(proj, baseOverride) {
   for (const f of untracked) {
     fileSet.add(f);
     try {
-      const full = path2.join(proj, f);
-      const st = fs2.statSync(full);
+      const full = path4.join(proj, f);
+      const st = fs4.statSync(full);
       if (st.isDirectory() || st.size > 512 * 1024) continue;
-      const lines = fs2.readFileSync(full, "utf8").split("\n").slice(0, MAX_UNTRACKED_FILE_LINES);
+      const lines = fs4.readFileSync(full, "utf8").split("\n").slice(0, MAX_UNTRACKED_FILE_LINES);
       const body = lines.map((l, i) => `${i + 1}: +${l}`).join("\n");
       perFile.push({ file: f, patch: `=== new file: ${f} ===
 ${body}`, addedLines: lines.length });
@@ -876,48 +1139,209 @@ function buildChunks(perFile, cfg) {
   };
 }
 
+// src/core/testIntegrity.ts
+function isTestFile(f) {
+  if (/\.(test|spec)\.[cm]?[jt]sx?$/.test(f)) return true;
+  if (/(^|\/)__tests__\//.test(f)) return true;
+  if (/(^|\/)test_[^/]+\.py$/.test(f) || /_test\.(py|go)$/.test(f)) return true;
+  if (/(^|\/)tests?\//.test(f) && /\.(py|go|rb|[cm]?[jt]sx?)$/.test(f)) return true;
+  return false;
+}
+var norm = (s) => s.replace(/\s+/g, " ").trim();
+function changedLines(patch) {
+  const added = [];
+  const removed = [];
+  for (let line of patch.split("\n")) {
+    line = line.replace(/^\d+: /, "");
+    if (line.startsWith("+") && !line.startsWith("+++")) added.push(line.slice(1));
+    else if (line.startsWith("-") && !line.startsWith("---")) removed.push(line.slice(1));
+  }
+  return { added, removed };
+}
+function cancelMoves(added, removed) {
+  const count = (lines) => {
+    const m = /* @__PURE__ */ new Map();
+    for (const l of lines) {
+      const k = norm(l);
+      m.set(k, (m.get(k) ?? 0) + 1);
+    }
+    return m;
+  };
+  const a = count(added);
+  const netRemoved = removed.filter((l) => {
+    const k = norm(l);
+    const c = a.get(k) ?? 0;
+    if (c > 0) {
+      a.set(k, c - 1);
+      return false;
+    }
+    return true;
+  });
+  const r = count(removed);
+  const netAdded = added.filter((l) => {
+    const k = norm(l);
+    const c = r.get(k) ?? 0;
+    if (c > 0) {
+      r.set(k, c - 1);
+      return false;
+    }
+    return true;
+  });
+  return { netAdded, netRemoved };
+}
+var FOCUS_SKIP = /(\.(only|skip)\s*\()|(\bx(it|describe|test)\s*\()|(@pytest\.mark\.skip)|(\bunittest\.skip)|(\bt\.Skip\s*\()/;
+var ASSERTION = /(\bexpect\s*\()|(\bassert\b)|(\.should\b)|(\bassert[A-Z]\w*\s*\()/;
+var TEST_DECL = /(\b(it|test)\s*\(\s*['"`])|(\bdef\s+test_)/;
+var STRICT_MATCHER = /\.(toBe|toEqual|toStrictEqual)\s*\(/;
+var VACUOUS_MATCHER = /\.(toBeTruthy|toBeDefined|toBeFalsy)\s*\(|\.not\.toThrow\s*\(/;
+function expectSubject(line) {
+  const m = line.match(/expect\s*\((.*?)\)\s*\./);
+  return m ? norm(m[1]) : null;
+}
+function toBeArg(line) {
+  const m = line.match(/expect\s*\((.*?)\)\s*\.(?:toBe|toEqual|toStrictEqual)\s*\((.*?)\)/);
+  return m ? { subject: norm(m[1]), arg: norm(m[2]) } : null;
+}
+var sample = (lines, n = 3) => lines.slice(0, n).map((l) => `  ${l.trim()}`).join("\n");
+function checkTestIntegrity(perFile, cfg) {
+  const findings = [];
+  const prodChanged = perFile.some((f) => !isTestFile(f.file));
+  const canBlock = cfg.enforcement.block && cfg.enforcement.blockOn.includes("integrity");
+  for (const fd of perFile) {
+    if (!isTestFile(fd.file)) continue;
+    const { added, removed } = changedLines(fd.patch);
+    const { netAdded, netRemoved } = cancelMoves(added, removed);
+    const skips = netAdded.filter((l) => FOCUS_SKIP.test(l));
+    if (skips.length) {
+      findings.push(
+        makeFinding({
+          kind: canBlock ? "blocking" : "info",
+          tier: "integrity",
+          title: "test focus/skip marker added",
+          file: fd.file,
+          confidence: "fact",
+          detail: `This change adds ${skips.length} focus/skip marker(s) \u2014 .only/.skip silently disables tests:
+${sample(skips)}
+Remove them (or dismiss if genuinely intended).`,
+          fpExtra: ["focus-skip"]
+        })
+      );
+    }
+    const strictSubjects = new Set(netRemoved.filter((l) => STRICT_MATCHER.test(l)).map(expectSubject).filter(Boolean));
+    const loosened = netAdded.filter((l) => {
+      if (!VACUOUS_MATCHER.test(l)) return false;
+      const s = expectSubject(l);
+      return !!s && strictSubjects.has(s);
+    });
+    if (loosened.length) {
+      findings.push(
+        makeFinding({
+          kind: canBlock ? "blocking" : "info",
+          tier: "integrity",
+          title: "test assertion loosened (strict matcher \u2192 vacuous)",
+          file: fd.file,
+          confidence: "fact",
+          detail: `A strict assertion was replaced with one that can barely fail:
+${sample(loosened)}
+Restore a strict assertion on the real expected value.`,
+          fpExtra: ["loosened-matcher"]
+        })
+      );
+    }
+    const removedAsserts = netRemoved.filter((l) => ASSERTION.test(l)).length;
+    const addedAsserts = netAdded.filter((l) => ASSERTION.test(l)).length;
+    const netLoss = removedAsserts - addedAsserts;
+    if (prodChanged && netLoss >= 2) {
+      findings.push(
+        makeFinding({
+          kind: "info",
+          tier: "integrity",
+          title: "assertions removed alongside production changes",
+          file: fd.file,
+          confidence: "fact",
+          detail: `${netLoss} more assertion(s) removed than added in this test file, in the same change that modifies production code. Make sure coverage wasn't weakened to get tests passing.`,
+          fpExtra: ["assertion-loss"]
+        })
+      );
+    }
+    const deletedTests = netRemoved.filter((l) => TEST_DECL.test(l)).length;
+    const addedTests = netAdded.filter((l) => TEST_DECL.test(l)).length;
+    if (prodChanged && deletedTests > addedTests) {
+      findings.push(
+        makeFinding({
+          kind: "info",
+          tier: "integrity",
+          title: "test case(s) deleted alongside production changes",
+          file: fd.file,
+          confidence: "fact",
+          detail: `${deletedTests - addedTests} test case(s) removed in the same change that modifies production code. Confirm the deletion was requested, not a shortcut to green.`,
+          fpExtra: ["test-deleted"]
+        })
+      );
+    }
+    if (prodChanged) {
+      const before = new Map(netRemoved.map(toBeArg).filter(Boolean).map((x) => [x.subject, x.arg]));
+      const drifted = netAdded.map(toBeArg).filter((x) => !!x).filter((x) => before.has(x.subject) && before.get(x.subject) !== x.arg);
+      if (drifted.length) {
+        findings.push(
+          makeFinding({
+            kind: "question",
+            tier: "integrity",
+            title: "expected test values changed to match new behavior",
+            file: fd.file,
+            confidence: "fact",
+            detail: `${drifted.length} assertion(s) had their expected value changed in the same diff that changes the code under test (e.g. ${drifted[0].subject}: ${before.get(drifted[0].subject)} \u2192 ${drifted[0].arg}). Confirm the NEW values are what the user actually wants \u2014 not the code's new (possibly wrong) output.`,
+            fpExtra: ["expectation-drift"]
+          })
+        );
+      }
+    }
+  }
+  return findings;
+}
+
 // src/core/workspaces.ts
-var fs3 = __toESM(require("fs"));
-var path3 = __toESM(require("path"));
-function readJSON(file) {
+var fs5 = __toESM(require("fs"));
+var path5 = __toESM(require("path"));
+function readJSON2(file) {
   try {
-    return JSON.parse(fs3.readFileSync(file, "utf8"));
+    return JSON.parse(fs5.readFileSync(file, "utf8"));
   } catch {
     return null;
   }
 }
 function detectPackageManager(proj) {
-  if (fs3.existsSync(path3.join(proj, "pnpm-lock.yaml"))) return "pnpm";
-  if (fs3.existsSync(path3.join(proj, "yarn.lock"))) return "yarn";
-  if (fs3.existsSync(path3.join(proj, "bun.lockb")) || fs3.existsSync(path3.join(proj, "bun.lock"))) return "bun";
+  if (fs5.existsSync(path5.join(proj, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs5.existsSync(path5.join(proj, "yarn.lock"))) return "yarn";
+  if (fs5.existsSync(path5.join(proj, "bun.lockb")) || fs5.existsSync(path5.join(proj, "bun.lock"))) return "bun";
   return "npm";
 }
 function expandGlob(proj, pattern) {
   const clean = pattern.replace(/\/\*\*$/, "/*");
   if (clean.endsWith("/*")) {
     const base = clean.slice(0, -2);
-    const baseDir = path3.join(proj, base);
+    const baseDir = path5.join(proj, base);
     try {
-      return fs3.readdirSync(baseDir, { withFileTypes: true }).filter((d) => d.isDirectory() && fs3.existsSync(path3.join(baseDir, d.name, "package.json"))).map((d) => path3.join(base, d.name));
+      return fs5.readdirSync(baseDir, { withFileTypes: true }).filter((d) => d.isDirectory() && fs5.existsSync(path5.join(baseDir, d.name, "package.json"))).map((d) => path5.join(base, d.name));
     } catch {
       return [];
     }
   }
-  return fs3.existsSync(path3.join(proj, clean, "package.json")) ? [clean] : [];
+  return fs5.existsSync(path5.join(proj, clean, "package.json")) ? [clean] : [];
 }
 function pkgFromDir(proj, dir) {
-  const pj = readJSON(path3.join(proj, dir, "package.json"));
-  return { name: pj?.name || path3.basename(dir) || "root", dir };
+  const pj = readJSON2(path5.join(proj, dir, "package.json"));
+  return { name: pj?.name || path5.basename(dir) || "root", dir };
 }
 function detectWorkspaces(proj) {
   const pm = detectPackageManager(proj);
-  const rootPkg = readJSON(path3.join(proj, "package.json"));
+  const rootPkg = readJSON2(path5.join(proj, "package.json"));
   let patterns = [];
   let tool = "none";
-  const pnpmWs = path3.join(proj, "pnpm-workspace.yaml");
-  if (fs3.existsSync(pnpmWs)) {
+  const pnpmWs = path5.join(proj, "pnpm-workspace.yaml");
+  if (fs5.existsSync(pnpmWs)) {
     tool = "pnpm";
-    const txt = fs3.readFileSync(pnpmWs, "utf8");
+    const txt = fs5.readFileSync(pnpmWs, "utf8");
     let inPkgs = false;
     for (const line of txt.split("\n")) {
       if (/^packages:/.test(line)) {
@@ -938,30 +1362,30 @@ function detectWorkspaces(proj) {
       tool = pm;
     }
   }
-  if (fs3.existsSync(path3.join(proj, "nx.json"))) tool = "nx";
-  else if (fs3.existsSync(path3.join(proj, "turbo.json"))) tool = "turbo";
-  else if (fs3.existsSync(path3.join(proj, "lerna.json")) && tool === "none") tool = "lerna";
+  if (fs5.existsSync(path5.join(proj, "nx.json"))) tool = "nx";
+  else if (fs5.existsSync(path5.join(proj, "turbo.json"))) tool = "turbo";
+  else if (fs5.existsSync(path5.join(proj, "lerna.json")) && tool === "none") tool = "lerna";
   const dirs = /* @__PURE__ */ new Set();
   for (const p of patterns) for (const d of expandGlob(proj, p)) dirs.add(d);
   if (!dirs.size) {
     const cargo = readCargoWorkspace(proj);
     if (cargo.length) return { isMonorepo: true, tool: "cargo", packageManager: pm, packages: cargo };
-    if (fs3.existsSync(path3.join(proj, "go.work"))) return { isMonorepo: true, tool: "go", packageManager: pm, packages: [] };
+    if (fs5.existsSync(path5.join(proj, "go.work"))) return { isMonorepo: true, tool: "go", packageManager: pm, packages: [] };
   }
   const packages = [...dirs].sort().map((d) => pkgFromDir(proj, d));
   return { isMonorepo: packages.length > 0, tool: packages.length ? tool : "none", packageManager: pm, packages };
 }
 function readCargoWorkspace(proj) {
-  const cargo = path3.join(proj, "Cargo.toml");
-  if (!fs3.existsSync(cargo)) return [];
-  const txt = fs3.readFileSync(cargo, "utf8");
+  const cargo = path5.join(proj, "Cargo.toml");
+  if (!fs5.existsSync(cargo)) return [];
+  const txt = fs5.readFileSync(cargo, "utf8");
   if (!/\[workspace\]/.test(txt)) return [];
   const m = txt.match(/members\s*=\s*\[([^\]]*)\]/);
   if (!m) return [];
   const members = [...m[1].matchAll(/["']([^"']+)["']/g)].map((x) => x[1]);
   const dirs = /* @__PURE__ */ new Set();
   for (const p of members) for (const d of expandGlob(proj, p)) dirs.add(d);
-  return [...dirs].map((d) => ({ name: path3.basename(d), dir: d }));
+  return [...dirs].map((d) => ({ name: path5.basename(d), dir: d }));
 }
 function affectedPackages(changedFiles, packages) {
   const byDirLen = [...packages].sort((a, b) => b.dir.length - a.dir.length);
@@ -978,8 +1402,8 @@ function affectedPackages(changedFiles, packages) {
 }
 
 // src/core/tia.ts
-var fs4 = __toESM(require("fs"));
-var path4 = __toESM(require("path"));
+var fs6 = __toESM(require("fs"));
+var path6 = __toESM(require("path"));
 var ROOT_PATTERNS = [
   /(^|\/)package\.json$/,
   /(^|\/)[^/]*lock[^/]*$/i,
@@ -1005,7 +1429,7 @@ function selectTests(opts) {
   let effectiveRunner = runner;
   if (!effectiveRunner && viaScript(testCmd)) {
     try {
-      const pj = JSON.parse(fs4.readFileSync(path4.join(proj, "package.json"), "utf8"));
+      const pj = JSON.parse(fs6.readFileSync(path6.join(proj, "package.json"), "utf8"));
       effectiveRunner = detectRunner(String(pj?.scripts?.test ?? ""));
     } catch {
     }
@@ -1014,7 +1438,7 @@ function selectTests(opts) {
   if (changedFiles.some((f) => ROOT_PATTERNS.some((re) => re.test(f)))) {
     return full("a root/config file changed \u2192 full suite");
   }
-  const sources = changedFiles.filter((f) => CODE_RE.test(f) && fs4.existsSync(path4.join(proj, f)));
+  const sources = changedFiles.filter((f) => CODE_RE.test(f) && fs6.existsSync(path6.join(proj, f)));
   if (sources.length === 0) return full("no changed source files to target \u2192 full suite");
   const fileArgs = sources.map((f) => JSON.stringify(f)).join(" ");
   const pass = viaScript(testCmd) ? " --" : "";
@@ -1035,60 +1459,9 @@ function selectTests(opts) {
   return full("cannot safely narrow this runner invocation \u2192 full suite");
 }
 
-// src/core/memory.ts
-var fs5 = __toESM(require("fs"));
-var path5 = __toESM(require("path"));
-function vouchDir(proj) {
-  return path5.join(proj, ".vouch");
-}
-function runsDir(proj) {
-  return path5.join(vouchDir(proj), "runs");
-}
-function configPath(proj) {
-  return path5.join(vouchDir(proj), "config.json");
-}
-function intentDir(proj) {
-  return path5.join(vouchDir(proj), "intent");
-}
-function activeIntentPath(proj) {
-  return path5.join(intentDir(proj), "active.json");
-}
-function dismissalsPath(proj) {
-  return path5.join(vouchDir(proj), "dismissals.json");
-}
-function ensureVouchDir(proj) {
-  fs5.mkdirSync(runsDir(proj), { recursive: true });
-  fs5.mkdirSync(intentDir(proj), { recursive: true });
-  const gi = path5.join(vouchDir(proj), ".gitignore");
-  if (!fs5.existsSync(gi)) {
-    fs5.writeFileSync(gi, "runs/\n");
-  }
-}
-function readJSON2(file, fallback) {
-  try {
-    if (!fs5.existsSync(file)) return fallback;
-    const raw = fs5.readFileSync(file, "utf8");
-    if (!raw.trim()) return fallback;
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
-}
-function writeJSON(file, obj) {
-  fs5.mkdirSync(path5.dirname(file), { recursive: true });
-  fs5.writeFileSync(file, JSON.stringify(obj, null, 2) + "\n");
-}
-function exists(file) {
-  try {
-    return fs5.existsSync(file);
-  } catch {
-    return false;
-  }
-}
-
 // src/core/dismissals.ts
 function loadDismissals(proj) {
-  return readJSON2(dismissalsPath(proj), []);
+  return readJSON(dismissalsPath(proj), []);
 }
 function filterDismissed(findings, dismissals) {
   const set = new Set(dismissals.map((d) => d.fingerprint));
@@ -1185,6 +1558,10 @@ async function runPipeline(opts) {
   let testsSelected = null;
   const coverageNotes = [];
   if (ws.isMonorepo) coverageNotes.push(`monorepo (${ws.tool}); ${scopedPkgs.length} package(s) affected`);
+  if (cfg.tiers.integrity) {
+    ranTiers.push("integrity");
+    findings.push(...checkTestIntegrity(diff.perFile, cfg));
+  }
   let compileBroken = false;
   for (const tier of TIER_ORDER) {
     let rc = cfg.commands[tier];
@@ -1241,7 +1618,19 @@ async function runPipeline(opts) {
     if (built.skippedFiles.length) {
       skipped.push({ tier: "intent", reason: `${built.skippedFiles.length} file(s) beyond maxReviewFiles not reviewed` });
     }
-    const reviewFindings = await deps.reviewIntent({ proj, intent, cfg, chunks: built.chunks });
+    const bk = describeBackends(cfg);
+    if (bk.map) {
+      const cross = bk.verify && bk.verify !== bk.map;
+      coverageNotes.push(`reviewer: map=${bk.map}, verify=${bk.verify ?? bk.map}${cross ? " (cross-model)" : ""}`);
+    }
+    const reviewFindings = await deps.reviewIntent({
+      proj,
+      intent,
+      cfg,
+      chunks: built.chunks,
+      deadlineMs: startedAt + cfg.budgetSec * 1e3,
+      onNote: (s) => coverageNotes.push(s)
+    });
     findings.push(...reviewFindings);
   }
   if (cfg.tiers.smoke) {
@@ -1287,6 +1676,7 @@ function defaultConfig() {
       lint: true,
       build: true,
       test: true,
+      integrity: true,
       intent: true,
       smoke: false
     },
@@ -1294,14 +1684,23 @@ function defaultConfig() {
       block: true,
       // Only objective, deterministic failures block by default. Lint and the
       // LLM intent review are advisory unless the user opts them in — this is
-      // the core false-positive guardrail.
-      blockOn: ["typecheck", "build", "test"],
+      // the core false-positive guardrail. 'integrity' is deterministic diff
+      // analysis (test-weakening detection); only its high-signal detectors
+      // emit blocking-class findings.
+      blockOn: ["typecheck", "build", "test", "integrity"],
+      blockWhenProven: true,
       maxIterations: 3
     },
     reviewer: {
       model: void 0,
       timeoutSec: 90,
-      backend: "auto"
+      backend: "auto",
+      verifierBackend: "auto"
+    },
+    probe: {
+      enabled: true,
+      timeoutSec: 20,
+      maxPerRun: 5
     },
     // Default to max accuracy (per product decision): full map-reduce + N-vote
     // independent verification. Budget-bounded so a huge repo degrades honestly
@@ -1327,10 +1726,10 @@ function saveConfig(proj, cfg) {
 }
 
 // src/core/intent.ts
-var path6 = __toESM(require("path"));
+var path7 = __toESM(require("path"));
 function loadActiveIntent(proj) {
   if (!exists(activeIntentPath(proj))) return null;
-  const r = readJSON2(activeIntentPath(proj), null);
+  const r = readJSON(activeIntentPath(proj), null);
   if (!r || r.status !== "active") return null;
   return r;
 }
@@ -1344,7 +1743,7 @@ function recordIntent(proj, input, nowISO) {
   const prev = loadActiveIntent(proj);
   if (prev) {
     prev.status = "archived";
-    writeJSON(path6.join(intentDir(proj), `${prev.id}.json`), prev);
+    writeJSON(path7.join(intentDir(proj), `${prev.id}.json`), prev);
   }
   const record = {
     id: newId(nowISO),
@@ -1366,23 +1765,36 @@ function sh(proj, args) {
   (0, import_child_process4.execFileSync)("git", args, { cwd: proj, stdio: "ignore" });
 }
 function setupCase(c) {
-  const proj = fs6.mkdtempSync(path7.join(os.tmpdir(), "vouch-eval-"));
+  const proj = fs7.mkdtempSync(path8.join(os.tmpdir(), "vouch-eval-"));
   sh(proj, ["init", "-q"]);
   sh(proj, ["config", "user.email", "e@e.e"]);
   sh(proj, ["config", "user.name", "e"]);
-  for (const [f, content] of Object.entries(c.baseline)) fs6.writeFileSync(path7.join(proj, f), content);
+  for (const [f, content] of Object.entries(c.baseline)) fs7.writeFileSync(path8.join(proj, f), content);
   sh(proj, ["add", "-A"]);
   sh(proj, ["commit", "-qm", "baseline"]);
-  for (const [f, content] of Object.entries(c.change)) fs6.writeFileSync(path7.join(proj, f), content);
+  for (const [f, content] of Object.entries(c.change)) fs7.writeFileSync(path8.join(proj, f), content);
+  const cfg = evalConfig(c);
+  saveConfig(proj, cfg);
+  recordIntent(proj, c.intent, (/* @__PURE__ */ new Date()).toISOString());
+  return proj;
+}
+function evalConfig(c) {
   const cfg = defaultConfig();
-  cfg.tiers = { typecheck: false, lint: false, build: false, test: false, intent: true, smoke: false };
+  cfg.tiers = {
+    typecheck: false,
+    lint: false,
+    build: false,
+    test: false,
+    integrity: false,
+    intent: true,
+    smoke: false,
+    ...c.tiersOverride ?? {}
+  };
   const mode = process.env.VOUCH_EVAL_MODE || "bounded";
   cfg.mode = mode;
   if (mode === "bounded") cfg.review.quorumN = 1;
   cfg.reviewer.timeoutSec = 90;
-  saveConfig(proj, cfg);
-  recordIntent(proj, c.intent, (/* @__PURE__ */ new Date()).toISOString());
-  return proj;
+  return cfg;
 }
 async function main() {
   const only = process.env.VOUCH_EVAL_ONLY;
@@ -1390,30 +1802,35 @@ async function main() {
   console.log(`Running ${cases.length} eval cases (mode=${process.env.VOUCH_EVAL_MODE || "bounded"})\u2026
 `);
   let tp = 0, fp = 0, tn = 0, fn = 0;
+  let provenTotal = 0, provenOk = 0;
   const rows = [];
   for (const c of cases) {
     const proj = setupCase(c);
     let flagged = false;
+    let proven = false;
     let detail = "";
     try {
-      const cfg = defaultConfig();
-      cfg.tiers = { typecheck: false, lint: false, build: false, test: false, intent: true, smoke: false };
-      cfg.mode = process.env.VOUCH_EVAL_MODE || "bounded";
-      if (cfg.mode === "bounded") cfg.review.quorumN = 1;
-      const intent = JSON.parse(fs6.readFileSync(path7.join(proj, ".vouch/intent/active.json"), "utf8"));
+      const cfg = evalConfig(c);
+      const intent = JSON.parse(fs7.readFileSync(path8.join(proj, ".vouch/intent/active.json"), "utf8"));
       const res = await runPipeline({ proj, cfg, intent, force: true });
       const surfaced = [...res.blocking, ...res.questions];
       flagged = surfaced.length > 0;
+      proven = res.blocking.some((f) => f.provenBy === "probe");
       detail = surfaced.map((f) => f.title).join("; ").slice(0, 80);
     } catch (e) {
       detail = "ERROR " + (e?.message ?? e);
     } finally {
-      fs6.rmSync(proj, { recursive: true, force: true });
+      fs7.rmSync(proj, { recursive: true, force: true });
     }
     const correct = c.expect === "flag" === flagged;
     if (c.expect === "flag") flagged ? tp++ : fn++;
     else flagged ? fp++ : tn++;
-    rows.push(`  ${correct ? "\u2705" : "\u274C"} [${c.bucket}] ${c.name} \u2192 ${flagged ? "FLAGGED" : "clean"}${detail ? `  (${detail})` : ""}`);
+    if (c.expectProven) {
+      provenTotal++;
+      if (proven) provenOk++;
+    }
+    const provenTag = c.expectProven ? proven ? " [PROVEN \u2713]" : " [not proven]" : "";
+    rows.push(`  ${correct ? "\u2705" : "\u274C"} [${c.bucket}] ${c.name} \u2192 ${flagged ? "FLAGGED" : "clean"}${provenTag}${detail ? `  (${detail})` : ""}`);
   }
   const precision = tp + fp === 0 ? 1 : tp / (tp + fp);
   const recall = tp + fn === 0 ? 1 : tp / (tp + fn);
@@ -1425,6 +1842,7 @@ async function main() {
   console.log(`  TP ${tp}  FP ${fp}  TN ${tn}  FN ${fn}`);
   console.log(`  precision ${(precision * 100).toFixed(0)}%  recall ${(recall * 100).toFixed(0)}%  F1 ${(f1 * 100).toFixed(0)}%`);
   console.log(`  effective false-positive rate ${(fpRate * 100).toFixed(0)}%  (gate: <${FP_GATE * 100}%)`);
+  if (provenTotal) console.log(`  probe-proven: ${provenOk}/${provenTotal} bad case(s) escalated to an executable fact`);
   const pass = fpRate <= FP_GATE && recall >= RECALL_FLOOR;
   console.log(`
 ${pass ? "\u2705 PASS" : "\u274C FAIL"} \u2014 FP ${(fpRate * 100).toFixed(0)}% (\u2264${FP_GATE * 100}%), recall ${(recall * 100).toFixed(0)}% (\u2265${RECALL_FLOOR * 100}%)`);

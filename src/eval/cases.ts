@@ -3,6 +3,8 @@
 // flag it. Three buckets: `bad` (real defect vs intent → expect flag), `good`
 // (correct change → expect clean), `hardneg` (correct-but-unusual, the classic
 // false-positive traps → expect clean).
+import { TierName } from '../core/types';
+
 export interface EvalCase {
   name: string;
   bucket: 'good' | 'bad' | 'hardneg';
@@ -10,6 +12,10 @@ export interface EvalCase {
   intent: { summary: string; acceptance_criteria: string[]; non_goals?: string[] };
   baseline: Record<string, string>;
   change: Record<string, string>;
+  /** Per-case tier overrides (e.g. integrity-only cases run without the LLM). */
+  tiersOverride?: Partial<Record<TierName, boolean>>;
+  /** Expect this bad case to end PROBE-PROVEN (blocking fact with runnable repro). */
+  expectProven?: boolean;
 }
 
 export const CASES: EvalCase[] = [
@@ -17,9 +23,39 @@ export const CASES: EvalCase[] = [
     name: 'bad-missing-upper-clamp',
     bucket: 'bad',
     expect: 'flag',
+    expectProven: true,
     intent: { summary: 'clamp(n) bounds its input to the inclusive range 0..100.', acceptance_criteria: ['returns 0 when n < 0', 'returns 100 when n > 100', 'returns n unchanged when 0<=n<=100'] },
     baseline: { 'clamp.js': 'function clamp(n){ return n; }\nmodule.exports={clamp};\n' },
     change: { 'clamp.js': 'function clamp(n){ if (n < 0) return 0; return n; }\nmodule.exports={clamp};\n' },
+  },
+  {
+    name: 'bad-weakened-test',
+    bucket: 'bad',
+    expect: 'flag',
+    tiersOverride: { intent: false, integrity: true },
+    intent: { summary: 'lineTotal multiplies price by qty.', acceptance_criteria: ['lineTotal(10,3) === 30'] },
+    baseline: {
+      'orders.js': 'function lineTotal(p,q){ return p*q; }\nmodule.exports={lineTotal};\n',
+      'orders.test.js': "const {lineTotal}=require('./orders');\nit('multiplies', () => { expect(lineTotal(10,3)).toBe(30); });\n",
+    },
+    change: {
+      'orders.js': 'function lineTotal(p,q){ return p+q; }\nmodule.exports={lineTotal};\n',
+      'orders.test.js': "const {lineTotal}=require('./orders');\nit('multiplies', () => { expect(lineTotal(10,3)).toBeDefined(); });\n",
+    },
+  },
+  {
+    name: 'hardneg-test-refactor',
+    bucket: 'hardneg',
+    expect: 'clean',
+    tiersOverride: { intent: false, integrity: true },
+    intent: { summary: 'rename a test for clarity.', acceptance_criteria: ['tests unchanged in behavior'] },
+    baseline: {
+      'orders.test.js': "const {lineTotal}=require('./orders');\nit('works', () => { expect(lineTotal(10,3)).toBe(30); });\n",
+      'orders.js': 'function lineTotal(p,q){ return p*q; }\nmodule.exports={lineTotal};\n',
+    },
+    change: {
+      'orders.test.js': "const {lineTotal}=require('./orders');\nit('multiplies price by qty', () => { expect(lineTotal(10,3)).toBe(30); });\nit('handles zero qty', () => { expect(lineTotal(10,0)).toBe(0); });\n",
+    },
   },
   {
     name: 'bad-no-negative-rejection',

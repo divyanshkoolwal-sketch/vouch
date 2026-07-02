@@ -8,7 +8,7 @@ describe('config', () => {
 
   it('default blocks only on deterministic tiers', () => {
     const d = defaultConfig();
-    expect(d.enforcement.blockOn).toEqual(['typecheck', 'build', 'test']);
+    expect(d.enforcement.blockOn).toEqual(['typecheck', 'build', 'test', 'integrity']);
     expect(d.enforcement.blockOn).not.toContain('intent');
     expect(d.enforcement.blockOn).not.toContain('lint');
     expect(d.enforcement.maxIterations).toBe(3);

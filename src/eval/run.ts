@@ -32,15 +32,29 @@ function setupCase(c: EvalCase): string {
   sh(proj, ['commit', '-qm', 'baseline']);
   for (const [f, content] of Object.entries(c.change)) fs.writeFileSync(path.join(proj, f), content);
 
-  const cfg: VouchConfig = defaultConfig();
-  cfg.tiers = { typecheck: false, lint: false, build: false, test: false, intent: true, smoke: false };
+  const cfg: VouchConfig = evalConfig(c);
+  saveConfig(proj, cfg);
+  recordIntent(proj, c.intent, new Date().toISOString());
+  return proj;
+}
+
+function evalConfig(c: EvalCase): VouchConfig {
+  const cfg = defaultConfig();
+  cfg.tiers = {
+    typecheck: false,
+    lint: false,
+    build: false,
+    test: false,
+    integrity: false,
+    intent: true,
+    smoke: false,
+    ...(c.tiersOverride ?? {}),
+  };
   const mode = (process.env.VOUCH_EVAL_MODE as VouchConfig['mode']) || 'bounded';
   cfg.mode = mode;
   if (mode === 'bounded') cfg.review.quorumN = 1;
   cfg.reviewer.timeoutSec = 90;
-  saveConfig(proj, cfg);
-  recordIntent(proj, c.intent, new Date().toISOString());
-  return proj;
+  return cfg;
 }
 
 async function main() {
@@ -49,21 +63,21 @@ async function main() {
   console.log(`Running ${cases.length} eval cases (mode=${process.env.VOUCH_EVAL_MODE || 'bounded'})…\n`);
 
   let tp = 0, fp = 0, tn = 0, fn = 0;
+  let provenTotal = 0, provenOk = 0;
   const rows: string[] = [];
 
   for (const c of cases) {
     const proj = setupCase(c);
     let flagged = false;
+    let proven = false;
     let detail = '';
     try {
-      const cfg = defaultConfig();
-      cfg.tiers = { typecheck: false, lint: false, build: false, test: false, intent: true, smoke: false };
-      cfg.mode = (process.env.VOUCH_EVAL_MODE as VouchConfig['mode']) || 'bounded';
-      if (cfg.mode === 'bounded') cfg.review.quorumN = 1;
+      const cfg = evalConfig(c);
       const intent = JSON.parse(fs.readFileSync(path.join(proj, '.vouch/intent/active.json'), 'utf8'));
       const res = await runPipeline({ proj, cfg, intent, force: true });
       const surfaced = [...res.blocking, ...res.questions];
       flagged = surfaced.length > 0;
+      proven = res.blocking.some((f) => f.provenBy === 'probe');
       detail = surfaced.map((f) => f.title).join('; ').slice(0, 80);
     } catch (e: any) {
       detail = 'ERROR ' + (e?.message ?? e);
@@ -74,7 +88,12 @@ async function main() {
     const correct = (c.expect === 'flag') === flagged;
     if (c.expect === 'flag') flagged ? tp++ : fn++;
     else flagged ? fp++ : tn++;
-    rows.push(`  ${correct ? '✅' : '❌'} [${c.bucket}] ${c.name} → ${flagged ? 'FLAGGED' : 'clean'}${detail ? `  (${detail})` : ''}`);
+    if (c.expectProven) {
+      provenTotal++;
+      if (proven) provenOk++;
+    }
+    const provenTag = c.expectProven ? (proven ? ' [PROVEN ✓]' : ' [not proven]') : '';
+    rows.push(`  ${correct ? '✅' : '❌'} [${c.bucket}] ${c.name} → ${flagged ? 'FLAGGED' : 'clean'}${provenTag}${detail ? `  (${detail})` : ''}`);
   }
 
   const precision = tp + fp === 0 ? 1 : tp / (tp + fp);
@@ -88,6 +107,7 @@ async function main() {
   console.log(`  TP ${tp}  FP ${fp}  TN ${tn}  FN ${fn}`);
   console.log(`  precision ${(precision * 100).toFixed(0)}%  recall ${(recall * 100).toFixed(0)}%  F1 ${(f1 * 100).toFixed(0)}%`);
   console.log(`  effective false-positive rate ${(fpRate * 100).toFixed(0)}%  (gate: <${FP_GATE * 100}%)`);
+  if (provenTotal) console.log(`  probe-proven: ${provenOk}/${provenTotal} bad case(s) escalated to an executable fact`);
 
   const pass = fpRate <= FP_GATE && recall >= RECALL_FLOOR;
   console.log(`\n${pass ? '✅ PASS' : '❌ FAIL'} — FP ${(fpRate * 100).toFixed(0)}% (≤${FP_GATE * 100}%), recall ${(recall * 100).toFixed(0)}% (≥${RECALL_FLOOR * 100}%)`);

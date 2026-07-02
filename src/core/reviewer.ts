@@ -11,6 +11,7 @@ import { ReviewChunk, reviewChunk } from './review/map';
 import { reduceFindings } from './review/reduce';
 import { groundFindings } from './review/groundGate';
 import { verifyFindings } from './review/verify';
+import { runProbes } from './review/probe';
 import { mapLimit } from './review/concurrency';
 
 export function reviewerAvailable(cfg: VouchConfig): boolean {
@@ -30,21 +31,25 @@ function fileReader(proj: string): (rel: string) => string | null {
 export interface ReviewDeps {
   reviewChunk: typeof reviewChunk;
   verifyFindings: typeof verifyFindings;
+  runProbes: typeof runProbes;
 }
 
 /** Run the full grounded review over pre-built chunks. Returns verified,
- *  evidence-grounded findings only. */
+ *  evidence-grounded findings only (probe-proven ones upgraded to facts). */
 export async function reviewIntent(opts: {
   proj: string;
   intent: IntentRecord;
   cfg: VouchConfig;
   chunks: ReviewChunk[];
+  deadlineMs?: number;
+  onNote?: (s: string) => void;
   deps?: Partial<ReviewDeps>;
 }): Promise<Finding[]> {
   const { proj, intent, cfg, chunks } = opts;
   if (!chunks.length) return [];
   const rc = opts.deps?.reviewChunk ?? reviewChunk;
   const vf = opts.deps?.verifyFindings ?? verifyFindings;
+  const rp = opts.deps?.runProbes ?? runProbes;
 
   // MAP — parallel grounded review of each chunk.
   const mapped = (await mapLimit(chunks, cfg.review.concurrency, (chunk) => rc({ proj, intent, chunk, cfg }))).flat();
@@ -59,5 +64,12 @@ export async function reviewIntent(opts: {
   // verbatim-grounded findings (the strong deterministic signal) are surfaced.
   if (grounded.length === 0) return grounded;
   if (cfg.mode === 'fast') return grounded.filter((f) => f.evidenceVerbatim);
-  return vf(grounded, { proj, intent, cfg });
+  let verified = await vf(grounded, { proj, intent, cfg });
+
+  // PROBE — "no repro, no block": try to turn each surviving opinion into an
+  // executable fact (or falsify it).
+  if (cfg.probe.enabled && verified.length) {
+    verified = await rp(verified, { proj, intent, cfg, deadlineMs: opts.deadlineMs, onNote: opts.onNote });
+  }
+  return verified;
 }
