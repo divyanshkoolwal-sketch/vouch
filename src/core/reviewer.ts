@@ -19,9 +19,24 @@ export function reviewerAvailable(cfg: VouchConfig): boolean {
 }
 
 function fileReader(proj: string): (rel: string) => string | null {
+  // Resolve the repo root once. The evidence gate uses this to read a finding's
+  // cited file to confirm a quote is real. A prompt-injected reviewer could put
+  // `../../etc/passwd` (or an absolute path) in `finding.file`; refuse anything
+  // that resolves outside the repo, and never follow symlinks out of it.
+  let root: string;
+  try {
+    root = fs.realpathSync(path.resolve(proj));
+  } catch {
+    root = path.resolve(proj);
+  }
   return (rel: string) => {
+    if (typeof rel !== 'string' || !rel) return null;
+    const abs = path.resolve(root, rel);
+    if (abs !== root && !abs.startsWith(root + path.sep)) return null; // path escapes repo
     try {
-      return fs.readFileSync(path.join(proj, rel), 'utf8');
+      const real = fs.realpathSync(abs);
+      if (real !== root && !real.startsWith(root + path.sep)) return null; // symlink escapes repo
+      return fs.readFileSync(real, 'utf8');
     } catch {
       return null;
     }

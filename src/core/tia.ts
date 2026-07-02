@@ -25,6 +25,16 @@ const ROOT_PATTERNS: RegExp[] = [
 
 const CODE_RE = /\.(ts|tsx|js|jsx|mjs|cjs)$/;
 
+/** Single-quote a value for POSIX sh so the shell cannot interpret it. The
+ *  TIA command string is executed via `/bin/sh -c`, and filenames come from the
+ *  repo (attacker-influenceable): a name like `foo$(touch PWNED).ts` inside
+ *  double quotes would still run `touch PWNED`. Single quotes disable ALL
+ *  metacharacters; the only escape needed is for an embedded single quote,
+ *  done with the classic close-escape-reopen idiom `'\''`. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 function detectRunner(cmd: string): 'jest' | 'vitest' | null {
   if (/\bvitest\b/.test(cmd)) return 'vitest';
   if (/\bjest\b/.test(cmd)) return 'jest';
@@ -69,7 +79,7 @@ export function selectTests(opts: {
   const sources = changedFiles.filter((f) => CODE_RE.test(f) && fs.existsSync(path.join(proj, f)));
   if (sources.length === 0) return full('no changed source files to target → full suite');
 
-  const fileArgs = sources.map((f) => JSON.stringify(f)).join(' ');
+  const fileArgs = sources.map(shq).join(' ');
   const pass = viaScript(testCmd) ? ' --' : '';
 
   if (effectiveRunner === 'jest') {
@@ -85,7 +95,9 @@ export function selectTests(opts: {
   // vitest is invoked (e.g. `npx vitest`, `./node_modules/.bin/vitest`).
   if (effectiveRunner === 'vitest') {
     if (viaScript(testCmd)) return full('vitest via package script cannot take the `related` subcommand → full suite');
-    const withRelated = testCmd.replace(/\bvitest\b(\s+run)?/, `vitest related ${fileArgs}`);
+    // Replace via a function so `$` in a quoted filename isn't treated as a
+    // replacement-pattern special ($&, $1, $').
+    const withRelated = testCmd.replace(/\bvitest\b(\s+run)?/, () => `vitest related ${fileArgs}`);
     const command = /(^|\s)--run(\s|$)/.test(withRelated) ? withRelated : `${withRelated} --run`;
     return { command, narrowed: true, selectedCount: sources.length, reason: `vitest related on ${sources.length} changed file(s)` };
   }

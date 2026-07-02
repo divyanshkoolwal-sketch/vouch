@@ -26,11 +26,11 @@ export interface ProbeInfo {
 /** Minimal probe record persisted across fix-loop rounds so a proven failure can
  *  be re-checked deterministically (no LLM) on the next stop. */
 export interface StoredProbe {
-  id: string; // the finding's fingerprint
+  id: string; // the finding's fingerprint (hex) — becomes the probe filename
   title: string;
   file?: string;
   criterion?: string;
-  command: string;
+  language: 'node' | 'python';
 }
 
 export interface Finding {
@@ -149,6 +149,10 @@ export interface VouchConfig {
     enabled: boolean;
     timeoutSec: number;
     maxPerRun: number;
+    /** Execute Python probes. OFF by default: unlike Node probes (run under the
+     *  OS permission sandbox), Python has no equivalent sandbox here, so LLM-
+     *  generated Python is only run if the user explicitly opts in. */
+    allowPython: boolean;
   };
   /** Verification intensity. thorough = full map-reduce + N-vote verification
    *  (max accuracy, default); bounded = cap chunks + single refutation;

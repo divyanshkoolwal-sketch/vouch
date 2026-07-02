@@ -8,18 +8,29 @@ export const claudeBackend: Backend = {
   name: 'claude',
   available: () => cliOnPath('claude'),
   async run(req: ReviewerRequest): Promise<ReviewerResult> {
-    const allowed = req.allowedTools ?? ['Read', 'Grep', 'Glob'];
+    // INLINE-ONLY: the reviewer gets no filesystem/exec/network tools, so an
+    // injected instruction in the (attacker-controlled) diff cannot make it read
+    // ~/.ssh, .env, credentials, etc. It judges only the context we hand it.
     const args = [
       '-p',
       req.userPrompt,
       '--output-format',
       'json',
-      '--allowedTools',
-      ...allowed,
+      '--disallowedTools',
+      'Read',
+      'Grep',
+      'Glob',
+      'Bash',
+      'Edit',
+      'Write',
+      'NotebookEdit',
+      'WebFetch',
+      'WebSearch',
+      'Task',
       '--append-system-prompt',
       req.systemPrompt,
       '--max-turns',
-      String(req.maxTurns ?? 8),
+      String(req.maxTurns ?? 2),
     ];
     if (req.model) args.push('--model', req.model);
 

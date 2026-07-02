@@ -44,9 +44,24 @@ export function findingsLogPath(proj: string): string {
 export function ensureVouchDir(proj: string): void {
   fs.mkdirSync(runsDir(proj), { recursive: true });
   fs.mkdirSync(intentDir(proj), { recursive: true });
+  // Always ensure runs/ is ignored — even if the user already has a custom
+  // .vouch/.gitignore. Transient run state (last-findings, dirty markers) must
+  // never be committed; a stale ignore file without this rule would leak it.
   const gi = path.join(vouchDir(proj), '.gitignore');
-  if (!fs.existsSync(gi)) {
-    fs.writeFileSync(gi, 'runs/\n');
+  let cur = '';
+  try {
+    cur = fs.existsSync(gi) ? fs.readFileSync(gi, 'utf8') : '';
+  } catch {
+    cur = '';
+  }
+  const hasRuns = cur.split('\n').some((l) => l.trim() === 'runs/' || l.trim() === '/runs/');
+  if (!hasRuns) {
+    const sep = cur && !cur.endsWith('\n') ? '\n' : '';
+    try {
+      fs.writeFileSync(gi, `${cur}${sep}runs/\n`);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
