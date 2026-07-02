@@ -39,6 +39,7 @@ export function defaultConfig(): VouchConfig {
       enabled: true,
       timeoutSec: 20,
       maxPerRun: 5,
+      allowPython: false,
     },
     // Default to max accuracy (per product decision): full map-reduce + N-vote
     // independent verification. Budget-bounded so a huge repo degrades honestly
@@ -59,23 +60,60 @@ export function defaultConfig(): VouchConfig {
   };
 }
 
-/** Deep-merge a stored (possibly partial) config over the defaults. */
+const clamp = (v: unknown, lo: number, hi: number, dflt: number): number => {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : dflt;
+  return Math.max(lo, Math.min(hi, Math.floor(n)));
+};
+
+// Only these env var names may ever be used for the API reviewer backend — a
+// hostile repo config must not be able to name (and exfiltrate) an arbitrary
+// secret env var like AWS_SECRET_ACCESS_KEY.
+const API_KEY_ENV_OK = /^(ANTHROPIC_API_KEY|OPENAI_API_KEY|VOUCH_[A-Z0-9_]+)$/;
+// Model names: must start with an alphanumeric (so the value can never look
+// like a CLI flag) and contain no spaces (so it stays a single token). Covers
+// real names like claude-sonnet-5, gpt-4o, anthropic/claude-3.
+const MODEL_OK = /^[A-Za-z0-9][A-Za-z0-9._:@/\-]{0,99}$/;
+
+/** Deep-merge a stored (possibly partial) config over the defaults, CLAMPING all
+ *  numeric fields and VALIDATING free-form strings — a repo-supplied config is
+ *  untrusted input and must not be able to cause DoS, flag-smuggling, or secret
+ *  exfiltration even before the trust gate is consulted. */
 export function normalizeConfig(stored: Partial<VouchConfig> | null): VouchConfig {
   const d = defaultConfig();
   if (!stored) return d;
+  const reviewer = { ...d.reviewer, ...(stored.reviewer ?? {}) };
+  // Reject a model string that could smuggle CLI flags; drop a disallowed apiKeyEnv.
+  if (reviewer.model && !MODEL_OK.test(reviewer.model)) reviewer.model = undefined;
+  if (reviewer.apiKeyEnv && !API_KEY_ENV_OK.test(reviewer.apiKeyEnv)) reviewer.apiKeyEnv = undefined;
+  reviewer.timeoutSec = clamp(reviewer.timeoutSec, 5, 300, d.reviewer.timeoutSec);
+
+  const review = { ...d.review, ...(stored.review ?? {}) };
+  review.concurrency = clamp(review.concurrency, 1, 8, d.review.concurrency);
+  review.quorumN = clamp(review.quorumN, 1, 7, d.review.quorumN);
+  review.chunkTokenBudget = clamp(review.chunkTokenBudget, 500, 100000, d.review.chunkTokenBudget);
+  review.maxReviewFiles = clamp(review.maxReviewFiles, 1, 200, d.review.maxReviewFiles);
+  review.minConfidence = Math.max(0, Math.min(1, typeof review.minConfidence === 'number' ? review.minConfidence : d.review.minConfidence));
+
+  const enforcement = { ...d.enforcement, ...(stored.enforcement ?? {}) };
+  enforcement.maxIterations = clamp(enforcement.maxIterations, 1, 10, d.enforcement.maxIterations);
+
+  const probe = { ...d.probe, ...(stored.probe ?? {}) };
+  probe.timeoutSec = clamp(probe.timeoutSec, 1, 60, d.probe.timeoutSec);
+  probe.maxPerRun = clamp(probe.maxPerRun, 0, 20, d.probe.maxPerRun);
+
   return {
     version: stored.version ?? d.version,
     commands: { ...d.commands, ...(stored.commands ?? {}) },
     web: { ...d.web, ...(stored.web ?? {}) },
     tiers: { ...d.tiers, ...(stored.tiers ?? {}) },
-    enforcement: { ...d.enforcement, ...(stored.enforcement ?? {}) },
-    reviewer: { ...d.reviewer, ...(stored.reviewer ?? {}) },
-    probe: { ...d.probe, ...(stored.probe ?? {}) },
-    mode: stored.mode ?? d.mode,
-    review: { ...d.review, ...(stored.review ?? {}) },
+    enforcement,
+    reviewer,
+    probe,
+    mode: stored.mode === 'thorough' || stored.mode === 'bounded' || stored.mode === 'fast' ? stored.mode : d.mode,
+    review,
     tia: { ...d.tia, ...(stored.tia ?? {}) },
-    commandTimeoutSec: stored.commandTimeoutSec ?? d.commandTimeoutSec,
-    budgetSec: stored.budgetSec ?? d.budgetSec,
+    commandTimeoutSec: clamp(stored.commandTimeoutSec, 5, 300, d.commandTimeoutSec),
+    budgetSec: clamp(stored.budgetSec, 10, 600, d.budgetSec),
   };
 }
 

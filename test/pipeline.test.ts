@@ -65,6 +65,7 @@ function deps(over: Partial<PipelineDeps>): Partial<PipelineDeps> {
     reviewerAvailable: () => false,
     reviewIntent: async () => [],
     runTier: makeRunTier({}),
+    trusted: () => true, // these tests exercise post-trust logic; the gate is tested separately
     ...over,
   };
 }
@@ -83,6 +84,28 @@ describe('pipeline decision logic', () => {
     expect(r.diffEmpty).toBe(true);
     expect(r.findings).toHaveLength(0);
     expect(r.fixPrompt).toBe('');
+  });
+
+  it('TRUST GATE: an untrusted repo runs NOTHING (no commands, reviewer, or probes)', async () => {
+    let ranTier = false;
+    let reviewed = false;
+    const r = await runPipeline({
+      proj: proj(),
+      cfg: cfgWith({ typecheck: 'tsc', test: 'npm test', intent: 'x' }),
+      intent,
+      deps: deps({
+        trusted: () => false, // untrusted
+        runTier: async (...a) => { ranTier = true; return makeRunTier({ test: 'fail' })(...a); },
+        reviewerAvailable: () => true,
+        reviewIntent: async () => { reviewed = true; return [makeFinding({ kind: 'blocking', tier: 'intent', title: 'x', confidence: 'high', fpExtra: ['c'] })]; },
+      }),
+    });
+    expect(ranTier).toBe(false); // no tier command executed
+    expect(reviewed).toBe(false); // no reviewer invoked
+    expect(r.findings).toHaveLength(0);
+    expect(r.blocking).toHaveLength(0);
+    expect(r.ranTiers).toHaveLength(0);
+    expect(r.summary).toMatch(/not trusted/);
   });
 
   it('turns a failing test into ONE blocking fact and defers intent review', async () => {

@@ -34,7 +34,7 @@ describe('selectTests (test impact analysis with safe fallback)', () => {
     expect(r.narrowed).toBe(true);
     expect(r.selectedCount).toBe(1);
     expect(r.command).toContain('-- --findRelatedTests');
-    expect(r.command).toContain('"src/a.ts"');
+    expect(r.command).toContain("'src/a.ts'"); // shell-quoted (single quotes), not raw
     expect(r.command).toContain('--passWithNoTests');
   });
 

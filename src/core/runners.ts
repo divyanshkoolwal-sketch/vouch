@@ -17,6 +17,17 @@ export interface CommandResult {
 const TAIL_CHARS = 4000;
 
 export function runCommand(cmd: string, cwd: string, timeoutMs: number, env = process.env): Promise<CommandResult> {
+  return runChild('/bin/sh', ['-c', cmd], cwd, timeoutMs, env);
+}
+
+/** Run a binary with an explicit argv array — NO shell, so no metacharacter
+ *  interpretation. Use for anything where the command/args are (even partly)
+ *  derived from repo content (e.g. probe execution). */
+export function runFile(bin: string, args: string[], cwd: string, timeoutMs: number, env = process.env): Promise<CommandResult> {
+  return runChild(bin, args, cwd, timeoutMs, env);
+}
+
+function runChild(bin: string, argv: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv): Promise<CommandResult> {
   return new Promise((resolve) => {
     const start = Date.now();
     let out = '';
@@ -25,7 +36,7 @@ export function runCommand(cmd: string, cwd: string, timeoutMs: number, env = pr
 
     let child;
     try {
-      child = spawn('/bin/sh', ['-c', cmd], { cwd, env });
+      child = spawn(bin, argv, { cwd, env });
     } catch (e: any) {
       resolve({ code: null, output: '', timedOut: false, spawnError: String(e?.message ?? e), durationMs: 0 });
       return;

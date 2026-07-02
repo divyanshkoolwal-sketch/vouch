@@ -11,6 +11,8 @@ import { workingDiff as defaultWorkingDiff, DiffResult } from './diff';
 import { buildChunks, BuildChunksResult } from './review/chunk';
 import { describeBackends } from './review/backends';
 import { checkTestIntegrity } from './testIntegrity';
+import { isTrusted } from './trust';
+import { redactFinding } from './redact';
 import { detectWorkspaces, affectedPackages } from './workspaces';
 import { selectTests } from './tia';
 import { dedupe } from './findings';
@@ -22,6 +24,7 @@ export interface PipelineDeps {
   reviewIntent: typeof defaultReviewIntent;
   reviewerAvailable: (cfg: VouchConfig) => boolean;
   workingDiff: (proj: string) => DiffResult;
+  trusted: (proj: string, cfg: VouchConfig) => boolean;
 }
 
 const defaultDeps: PipelineDeps = {
@@ -29,6 +32,7 @@ const defaultDeps: PipelineDeps = {
   reviewIntent: defaultReviewIntent,
   reviewerAvailable: defaultReviewerAvailable,
   workingDiff: defaultWorkingDiff,
+  trusted: isTrusted,
 };
 
 const TIER_ORDER: TierName[] = ['typecheck', 'lint', 'build', 'test'];
@@ -66,6 +70,38 @@ export async function runPipeline(opts: {
       notices: [],
       fixPrompt: '',
       summary: 'Vouch: no changes to verify',
+    };
+  }
+
+  // ---- TRUST GATE (the linchpin) ----
+  // A repo's `.vouch/config.json` chooses which commands run, which reviewer/API
+  // backend is used, and whether probes execute. On an UNTRUSTED repo (freshly
+  // cloned, never approved for its current config) we run NOTHING that a
+  // malicious config could weaponize: no tier commands, no reviewer, no probes,
+  // no context injection. This turns "clone → agent stops → zero-click RCE" into
+  // an inert no-op until the user reviews the config and runs /vouch:trust.
+  if (!deps.trusted(proj, cfg)) {
+    return {
+      diffEmpty,
+      ranTiers: [],
+      skipped: [{ tier: 'intent', reason: 'repo not trusted — no commands, reviewer, or probes were run' }],
+      findings: [],
+      blocking: [],
+      questions: [],
+      notices: [],
+      fixPrompt: '',
+      summary:
+        "Vouch: this repo's config is not trusted yet — review .vouch/config.json, then run /vouch:trust (or the trust_repo tool) to enable verification",
+      coverage: {
+        filesChanged: diff.perFile.length,
+        filesReviewed: 0,
+        filesSkippedTooLarge: [],
+        chunksReviewed: 0,
+        packagesScoped: [],
+        testsSelected: null,
+        budgetHit: false,
+        notes: ['UNTRUSTED repo: nothing was executed. This protects you from a malicious .vouch config on a cloned repo.'],
+      },
     };
   }
 
@@ -175,8 +211,8 @@ export async function runPipeline(opts: {
     skipped.push({ tier: 'smoke', reason: 'web smoke tier is experimental and not yet available in this build' });
   }
 
-  // ---- Filter dismissed + dedupe ----
-  findings = dedupe(filterDismissed(findings, loadDismissals(proj)));
+  // ---- Filter dismissed + dedupe + redact secrets ----
+  findings = dedupe(filterDismissed(findings, loadDismissals(proj))).map(redactFinding);
 
   const blocking = findings.filter((f) => f.kind === 'blocking');
   const questions = findings.filter((f) => f.kind === 'question');

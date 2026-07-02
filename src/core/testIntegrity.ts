@@ -24,13 +24,20 @@ export function isTestFile(f: string): boolean {
 
 const norm = (s: string) => s.replace(/\s+/g, ' ').trim();
 
+// Cap the length of any single line we feed to the regex detectors. A crafted
+// multi-kilobyte line (e.g. thousands of `)` with no following `.`) could make
+// a lazy regex backtrack pathologically (ReDoS) and hang the Stop hook. Every
+// legitimate matcher/skip/decl we look for appears near the start of a line, so
+// truncating for detection loses nothing real and bounds all downstream work.
+const MAX_LINE = 2000;
+
 function changedLines(patch: string): { added: string[]; removed: string[] } {
   const added: string[] = [];
   const removed: string[] = [];
   for (let line of patch.split('\n')) {
     line = line.replace(/^\d+: /, ''); // tolerate the synthesized new-file format
-    if (line.startsWith('+') && !line.startsWith('+++')) added.push(line.slice(1));
-    else if (line.startsWith('-') && !line.startsWith('---')) removed.push(line.slice(1));
+    if (line.startsWith('+') && !line.startsWith('+++')) added.push(line.slice(1, 1 + MAX_LINE));
+    else if (line.startsWith('-') && !line.startsWith('---')) removed.push(line.slice(1, 1 + MAX_LINE));
   }
   return { added, removed };
 }
@@ -75,13 +82,16 @@ const TEST_DECL = /(\b(it|test)\s*\(\s*['"`])|(\bdef\s+test_)/;
 const STRICT_MATCHER = /\.(toBe|toEqual|toStrictEqual)\s*\(/;
 const VACUOUS_MATCHER = /\.(toBeTruthy|toBeDefined|toBeFalsy)\s*\(|\.not\.toThrow\s*\(/;
 
+// Bounded lazy quantifiers ({0,300}?) instead of unbounded `.*?`: the max
+// expansion per attempt is fixed, so these cannot backtrack catastrophically
+// even before the per-line cap above.
 function expectSubject(line: string): string | null {
-  const m = line.match(/expect\s*\((.*?)\)\s*\./);
+  const m = line.match(/expect\s*\((.{0,300}?)\)\s*\./);
   return m ? norm(m[1]) : null;
 }
 
 function toBeArg(line: string): { subject: string; arg: string } | null {
-  const m = line.match(/expect\s*\((.*?)\)\s*\.(?:toBe|toEqual|toStrictEqual)\s*\((.*?)\)/);
+  const m = line.match(/expect\s*\((.{0,300}?)\)\s*\.(?:toBe|toEqual|toStrictEqual)\s*\((.{0,300}?)\)/);
   return m ? { subject: norm(m[1]), arg: norm(m[2]) } : null;
 }
 

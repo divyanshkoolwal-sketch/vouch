@@ -78,7 +78,7 @@ describe('executeProbe + runProbes (real node execution)', () => {
     expect(out[0].provenBy).toBe('probe');
     expect(out[0].kind).toBe('blocking'); // blockWhenProven default
     expect(out[0].confidence).toBe('fact');
-    expect(out[0].command).toMatch(/node ".vouch\/runs\/probes/);
+    expect(out[0].command).toMatch(/^node .*--allow-fs-read=.*\.vouch\/runs\/probes/);
     expect(fs.existsSync(path.join(proj, out[0].probe!.path))).toBe(true);
   });
 
@@ -150,16 +150,18 @@ describe('rerunStoredProbes (deterministic quick-path)', () => {
     dirs.push(proj);
     write(proj, 'clamp.js', 'function clamp(n){ if (n<0) return 0; return n; }\nmodule.exports={clamp};\n');
     write(proj, '.vouch/runs/probes/abc123.cjs', FAILING_PROBE);
-    const stored = [{ id: 'abc123', title: 'upper bound missing', file: 'clamp.js', criterion: 'returns 100 when n>100', command: 'node ".vouch/runs/probes/abc123.cjs"' }];
+    const stored = [{ id: 'abc123', title: 'upper bound missing', file: 'clamp.js', criterion: 'returns 100 when n>100', language: 'node' as const }];
 
-    const r1 = await rerunStoredProbes(stored, proj, 20);
+    const r1 = await rerunStoredProbes(stored, proj, defaultConfig());
     expect(r1.stillFailing).toHaveLength(1);
     expect(r1.stillFailing[0].id).toBe('abc123'); // same fingerprint → dismissals still work
     expect(r1.stillFailing[0].kind).toBe('blocking');
+    // The repro command is RECONSTRUCTED (sandboxed), never a stored string.
+    expect(r1.stillFailing[0].command).toMatch(/--allow-fs-read=/);
 
     // fix the code → probe passes → cleared
     write(proj, 'clamp.js', 'function clamp(n){ if (n<0) return 0; if (n>100) return 100; return n; }\nmodule.exports={clamp};\n');
-    const r2 = await rerunStoredProbes(stored, proj, 20);
+    const r2 = await rerunStoredProbes(stored, proj, defaultConfig());
     expect(r2.stillFailing).toHaveLength(0);
     expect(r2.clearedIds).toEqual(['abc123']);
   });
@@ -167,8 +169,8 @@ describe('rerunStoredProbes (deterministic quick-path)', () => {
   it('a missing probe file clears instead of failing', async () => {
     const proj = tmpProj();
     dirs.push(proj);
-    const r = await rerunStoredProbes([{ id: 'x', title: 't', command: 'node ".vouch/runs/probes/gone.cjs"' }], proj, 10);
+    const r = await rerunStoredProbes([{ id: 'abcdef', title: 't', file: 'gone.js', criterion: 'x', language: 'node' as const }], proj, defaultConfig());
     expect(r.stillFailing).toHaveLength(0);
-    expect(r.clearedIds).toEqual(['x']);
+    expect(r.clearedIds).toEqual(['abcdef']);
   });
 });

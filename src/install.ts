@@ -22,8 +22,23 @@ export interface InstallOpts {
 
 type Action = { kind: 'write' | 'skip' | 'backup' | 'note'; target: string; detail?: string };
 
-function q(s: string): string {
-  return `"${s}"`;
+/** A TOML basic string: escape backslash, double-quote, and control chars.
+ *  Install paths can contain backslashes (Windows) — an unescaped `\U…` is an
+ *  invalid TOML escape and would corrupt the config. */
+function tomlStr(s: string): string {
+  const esc = s
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+  return `"${esc}"`;
+}
+
+/** Single-quote a value for POSIX sh (hook command strings are run by a shell).
+ *  Neutralizes spaces and metacharacters in the install path. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 function readFileOr(file: string, fallback = ''): string {
@@ -46,8 +61,14 @@ function writeTarget(file: string, content: string, dry: boolean, actions: Actio
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (exists) {
-    fs.copyFileSync(file, file + '.bak');
-    actions.push({ kind: 'backup', target: file + '.bak' });
+    // Preserve the ORIGINAL (pre-Vouch) config: only create the .bak once, and
+    // never overwrite an existing backup on a later re-install (which would
+    // replace the pristine original with an already-modified version).
+    const bak = file + '.bak';
+    if (!fs.existsSync(bak)) {
+      fs.copyFileSync(file, bak);
+      actions.push({ kind: 'backup', target: bak });
+    }
   }
   fs.writeFileSync(file, content);
   actions.push({ kind: 'write', target: file, detail: exists ? 'updated' : 'created' });
@@ -123,13 +144,13 @@ function installCodex(opts: InstallOpts, actions: Action[]): void {
   const dir = codexDir();
   // 1) MCP server → config.toml (comment-preserving section upsert)
   const cfgToml = path.join(dir, 'config.toml');
-  const body = ['command = "node"', `args = [${q(path.join(DIST, 'mcp.js'))}]`, 'env = { VOUCH_HOST = "codex" }', ''].join('\n');
+  const body = ['command = "node"', `args = [${tomlStr(path.join(DIST, 'mcp.js'))}]`, 'env = { VOUCH_HOST = "codex" }', ''].join('\n');
   writeTarget(cfgToml, upsertTomlSection(readFileOr(cfgToml), body), !!opts.dryRun, actions);
 
   // 2) Hooks → hooks.json (Stop hard-block loop; PostToolUse dirty; SessionStart context)
   const hooksFile = path.join(dir, 'hooks.json');
   const hooksObj = readJSONObj(hooksFile);
-  const cmd = (script: string) => `VOUCH_HOST=codex bash ${q(path.join(SCRIPTS, script))}`;
+  const cmd = (script: string) => `VOUCH_HOST=codex bash ${shq(path.join(SCRIPTS, script))}`;
   mergeHookEvent(hooksObj, 'SessionStart', [{ hooks: [{ type: 'command', command: cmd('session-start.sh'), timeout: 10 }] }]);
   mergeHookEvent(hooksObj, 'PostToolUse', [{ hooks: [{ type: 'command', command: cmd('mark-dirty.sh'), timeout: 5 }] }]);
   mergeHookEvent(hooksObj, 'Stop', [{ hooks: [{ type: 'command', command: cmd('verify-stop.sh'), timeout: 240 }] }]);
@@ -182,8 +203,8 @@ function installCursor(opts: InstallOpts, actions: Action[]): void {
   const hooksFile = path.join(root, 'hooks.json');
   const hooksObj = readJSONObj(hooksFile);
   hooksObj.version = hooksObj.version ?? 1;
-  const nodeCmd = (subcmd: string) => `VOUCH_HOST=cursor node ${q(path.join(DIST, 'cli.js'))} ${subcmd}`;
-  mergeHookEvent(hooksObj, 'afterFileEdit', [{ command: `VOUCH_HOST=cursor bash ${q(path.join(SCRIPTS, 'mark-dirty.sh'))}` }]);
+  const nodeCmd = (subcmd: string) => `VOUCH_HOST=cursor node ${shq(path.join(DIST, 'cli.js'))} ${subcmd}`;
+  mergeHookEvent(hooksObj, 'afterFileEdit', [{ command: `VOUCH_HOST=cursor bash ${shq(path.join(SCRIPTS, 'mark-dirty.sh'))}` }]);
   mergeHookEvent(hooksObj, 'stop', [{ command: nodeCmd('cursor-stop') }]);
   if (opts.strict) {
     mergeHookEvent(hooksObj, 'beforeShellExecution', [{ command: nodeCmd('cursor-guard'), failClosed: true }]);

@@ -3,6 +3,18 @@
 // VOUCH_DISABLE=1 so a reviewer that spawns the host agent's own CLI can never
 // recursively trigger Vouch's hooks. Returns null on spawn error/timeout.
 import { spawn, execFileSync } from 'child_process';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
+
+// Opt-in reviewer debug log. Written to the per-user ~/.vouch dir (0700) as a
+// 0600 file — NOT a predictable /tmp path a co-tenant could pre-create as a
+// symlink (redirecting our append) or read (reviewer output can contain code).
+function debugLogPath(): string {
+  const dir = path.join(os.homedir(), '.vouch');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return path.join(dir, 'reviewer-debug.log');
+}
 
 export function cliOnPath(bin: string): boolean {
   try {
@@ -61,10 +73,15 @@ export function runCLI(
     const debug = (code: number | null) => {
       if (!process.env.VOUCH_DEBUG) return;
       try {
-        require('fs').appendFileSync(
-          '/tmp/vouch-reviewer-debug.log',
-          `\n=== ${bin} ${args.slice(0, 2).join(' ')} | code=${code} timedOut=${timedOut} len=${stdout.length} ===\n${stdout.slice(0, 3000)}\n`,
-        );
+        const fd = fs.openSync(debugLogPath(), 'a', 0o600);
+        try {
+          fs.writeSync(
+            fd,
+            `\n=== ${bin} ${args.slice(0, 2).join(' ')} | code=${code} timedOut=${timedOut} len=${stdout.length} ===\n${stdout.slice(0, 3000)}\n`,
+          );
+        } finally {
+          fs.closeSync(fd);
+        }
       } catch {
         /* ignore */
       }

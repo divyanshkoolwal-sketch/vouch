@@ -123,6 +123,16 @@ Vouch auto‑detects how to run your checks (test / lint / build / typecheck for
 
 When a finding is a genuine non‑issue, dismiss it (by its `vouch id`) and Vouch will **never raise it again**.
 
+## Security & trust
+
+Vouch runs automatically and executes things (your checks, an LLM reviewer, sandboxed probes), so it treats every repository as **untrusted until you approve it** — like VS Code Workspace Trust.
+
+- A repo's `.vouch` config does **nothing** (no commands, no reviewer, no probes, no context injection) until you run **`/vouch:trust`**, which first shows you exactly what the config authorizes. `/vouch:setup` trusts automatically because you authored the config in that flow.
+- **Clone a repo you don't fully trust?** Vouch stays inert until you review `.vouch/config.json` and trust it — so a malicious config can't turn "agent stops" into code execution.
+- The reviewer is **inline-only** (no file/shell/network tools) and treats the diff as untrusted data; findings are secret-redacted; probes run in an **OS sandbox** (repo-read-only, no network, no writes, no child processes); filenames are shell-escaped; hostile config values are clamped/allowlisted.
+
+Full details and threat model: [SECURITY.md](SECURITY.md).
+
 ---
 
 ## How it works
@@ -152,7 +162,7 @@ intent → agent writes code → [you stop] → Stop hook (only if the diff chan
 - **Reward-hack detection.** The integrity tier deterministically flags tests weakened in the same diff that changes production code — added `.only`/`.skip`, strict matchers loosened to vacuous ones, deleted assertions, expectation drift. The classic "make the test pass by changing the test" move blocks by default.
 - **Scales without truncation.** Big changes are chunked and reviewed in parallel (map-reduce) with absolute line numbers, never truncated. Monorepos are scoped to affected packages; the test tier runs only affected tests (with a safe fallback to the full suite on any root-file change). Everything Vouch couldn't fully cover is reported — never conflated with "clean."
 - **The brain is one shared core.** Hooks can't call MCP, so all logic lives in `src/core/` and is reached two ways: the **MCP server** (`dist/mcp.js`) and a **CLI** (`dist/cli.js`, invoked by the hooks).
-- **Independent + bounded.** The reviewer is a fresh read-only `claude -p` (no stake in the code, inherits your auth, `VOUCH_DISABLE=1` prevents hook recursion). The block→fix→re-verify loop is capped (default 3) via `stop_hook_active`, with `/vouch:off` as a kill switch.
+- **Independent + bounded + sandboxed.** The reviewer is a fresh `claude -p` with **no tools** (inline-only — it can't read files, run shells, or reach the network, so a prompt-injected diff can't exfiltrate anything), no stake in the code, inherits your auth, and runs with `VOUCH_DISABLE=1` to prevent hook recursion. The block→fix→re-verify loop is capped (default 3) via `stop_hook_active`, with `/vouch:off` as a kill switch. See [SECURITY.md](SECURITY.md).
 
 ### Facts vs. questions vs. notices
 | Class | Source | Blocks? |

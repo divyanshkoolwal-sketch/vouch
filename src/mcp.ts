@@ -14,6 +14,7 @@ import { detect } from './core/detect';
 import { appendText, conventionsPath, readJSON, findingsLogPath, ensureVouchDir, offPath, exists } from './core/memory';
 import { VouchConfig } from './core/types';
 import { coverageLine } from './core/prioritize';
+import { grantTrust, revokeTrust, trustSummary, isTrusted } from './core/trust';
 import * as fs from 'fs';
 
 function proj(): string {
@@ -26,7 +27,7 @@ function text(s: string) {
   return { content: [{ type: 'text' as const, text: s }] };
 }
 
-const server = new McpServer({ name: 'vouch', version: '0.4.0' });
+const server = new McpServer({ name: 'vouch', version: '0.5.0' });
 
 const cmdSchema = z.object({ cmd: z.string(), enabled: z.boolean() });
 
@@ -187,7 +188,32 @@ server.tool(
       reviewer: { ...existing.reviewer, ...(args.reviewerModel ? { model: args.reviewerModel } : {}) },
     });
     saveConfig(proj(), merged);
-    return text(`Vouch configured.\n${JSON.stringify(merged, null, 2)}`);
+    // The user just authored/approved this config in-session → trust it, so the
+    // author's own setup doesn't hit the trust gate. (A config that merely
+    // arrived inside a cloned repo is NOT trusted until /vouch:trust.)
+    grantTrust(proj(), merged, nowISO());
+    return text(`Vouch configured (and trusted for this repo).\n${JSON.stringify(merged, null, 2)}`);
+  },
+);
+
+server.tool(
+  'trust_repo',
+  "Grant or revoke trust for THIS repo's Vouch config. Vouch runs commands, an LLM reviewer, and sandboxed probes using settings from .vouch/config.json — but a cloned/untrusted repo's config is inert until trusted. Call with grant:true only after the user has reviewed what it will run (show them the summary first). Trust is re-required if the security-relevant config changes.",
+  {
+    grant: z.boolean().describe('true = trust this repo and enable verification; false = revoke trust.'),
+  },
+  async (args) => {
+    const cfg = loadConfig(proj());
+    if (!cfg) return text('Vouch is not set up for this repo (no .vouch/config.json).');
+    if (!args.grant) {
+      revokeTrust(proj());
+      return text('Trust revoked. Vouch verification is now inert in this repo.');
+    }
+    const summary = trustSummary(cfg);
+    grantTrust(proj(), cfg, nowISO());
+    return text(
+      `Repo trusted. Verification is now enabled here.\n\nThis authorizes Vouch to:\n${summary.map((l) => '  - ' + l).join('\n')}\n\nTrust is re-required if these settings change. Revoke anytime with trust_repo(grant:false).`,
+    );
   },
 );
 
@@ -204,6 +230,7 @@ server.tool(
       `Active intent: ${intent ? intent.summary : 'none'}`,
     ];
     if (cfg) {
+      lines.push(`Trusted: ${isTrusted(proj(), cfg) ? 'yes' : 'NO — verification is inert until /vouch:trust'}`);
       lines.push(`Tiers: ${Object.entries(cfg.tiers).filter(([, v]) => v).map(([k]) => k).join(', ')}`);
       lines.push(`Blocking on: ${cfg.enforcement.block ? cfg.enforcement.blockOn.join(', ') : '(disabled)'}`);
     }
